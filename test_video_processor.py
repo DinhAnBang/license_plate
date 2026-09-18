@@ -1,12 +1,15 @@
-"""Run the Phase 3 video processor on the supplied input video."""
+"""Run Phase 3, 4, or 5 video processing on the supplied input video."""
 
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
 
 import cv2
 
 from core.detector import DetectorError, PlateDetector
+from core.quality import PlateQualityEvaluator
+from core.tracker import PlateTracker
 from core.video_processor import VideoProcessingError, VideoProcessor
 
 
@@ -41,6 +44,21 @@ def validate_output(output_path: Path, expected: dict[str, object]) -> tuple[boo
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(description="Run Phase 3, 4, or 5 video processing.")
+    parser.add_argument(
+        "--tracking",
+        action="store_true",
+        help="enable Phase 4 IoU tracking and write a _tracked.mp4 output",
+    )
+    parser.add_argument(
+        "--quality",
+        action="store_true",
+        help="enable Phase 5 best-crop quality evaluation; tracking is enabled automatically",
+    )
+    args = parser.parse_args()
+    if args.quality:
+        args.tracking = True
+
     project_dir = Path(__file__).resolve().parent
     model_path = project_dir / "models" / "best.onnx"
     source_path = (
@@ -53,6 +71,8 @@ def main() -> int:
     print("VIDEO PROCESSOR")
     print("====================================")
     print(f"Source: {source_path.relative_to(project_dir)}")
+    print(f"Tracking: {'ON' if args.tracking else 'OFF'}")
+    print(f"Quality: {'ON' if args.quality else 'OFF'}")
 
     try:
         detector = PlateDetector(
@@ -61,10 +81,26 @@ def main() -> int:
             iou_threshold=0.45,
             providers=["CPUExecutionProvider"],
         )
+        tracker = PlateTracker(iou_threshold=0.25, max_missed=10) if args.tracking else None
+        quality_evaluator = (
+            PlateQualityEvaluator(
+                confidence_weight=0.30,
+                sharpness_weight=0.35,
+                brightness_weight=0.15,
+                size_weight=0.20,
+                sharpness_reference=500.0,
+                brightness_target=127.5,
+                reference_area=12_000.0,
+            )
+            if args.quality
+            else None
+        )
         processor = VideoProcessor(
             detector,
             output_dir=project_dir / "output",
             project_root=project_dir,
+            tracker=tracker,
+            quality_evaluator=quality_evaluator,
         )
         result = processor.process(source_path)
     except (DetectorError, VideoProcessingError, ValueError) as exc:
@@ -83,6 +119,65 @@ def main() -> int:
     print(f"Detector FPS: {result['detector_fps']:.2f}")
     print(f"Total processing: {result['total_processing_time']:.2f} s")
     print(f"Processing FPS: {result['processing_fps']:.2f}")
+
+    if args.tracking:
+        print(f"Average tracking: {result['avg_tracking_ms']:.4f} ms/frame")
+        print(f"Total tracks: {result['total_tracks']}")
+        print(f"Tracks with 1 hit: {result['tracks_with_1_hit']}")
+        print(f"Tracks with <=2 hits: {result['tracks_with_le_2_hits']}")
+        print(f"Tracks with >=3 hits: {result['tracks_with_ge_3_hits']}")
+        longest_track = result["longest_track"]
+        if longest_track is None:
+            print("Longest track: none")
+        else:
+            print("Longest track:")
+            print(f"  ID: {longest_track['track_id']}")
+            print(f"  First frame: {longest_track['first_frame']}")
+            print(f"  Last frame: {longest_track['last_frame']}")
+            print(f"  Hits: {longest_track['hits']}")
+        print("\nID  First  Last  Hits")
+        for track in result["tracks"]:
+            print(
+                f"{track['track_id']:>2}  {track['first_frame']:>5}  "
+                f"{track['last_frame']:>4}  {track['hits']:>4}"
+            )
+
+    if args.quality:
+        print("\nQuality configuration:")
+        print("  Confidence weight: 0.30")
+        print("  Sharpness weight: 0.35")
+        print("  Brightness weight: 0.15")
+        print("  Size weight: 0.20")
+        print("  Sharpness reference: 500.00")
+        print("  Brightness target: 127.50")
+        print("  Reference area: 12000.00 px^2")
+        print(f"Quality candidates: {result['quality_candidates']}")
+        print(f"Invalid crops: {result['invalid_crops']}")
+        print(f"Tracks with best crop: {result['tracks_with_best_crop']}")
+        print(f"Tracks without valid crop: {result['tracks_without_valid_crop']}")
+        print(f"Average quality: {result['avg_quality_ms']:.4f} ms/frame")
+        if result["min_best_quality"] is None:
+            print("Best quality: no valid best crops")
+        else:
+            print(
+                f"Best quality: min={result['min_best_quality']:.4f}, "
+                f"max={result['max_best_quality']:.4f}, "
+                f"average={result['avg_best_quality']:.4f}"
+            )
+        print(
+            "\nID | First | Last | Hits | BestFrame | Conf | Quality | Sharp | "
+            "SharpRaw | Bright | BrightRaw | Size | WxH | Area | Crop"
+        )
+        for best in result["best_crops"]:
+            print(
+                f"{best['track_id']} | {best['first_frame']} | {best['last_frame']} | "
+                f"{best['hits']} | {best['best_frame']} | {best['conf']:.3f} | "
+                f"{best['quality']:.3f} | {best['sharpness']:.3f} | "
+                f"{best['sharpness_raw']:.1f} | {best['brightness']:.3f} | "
+                f"{best['brightness_raw']:.1f} | {best['size']:.3f} | "
+                f"{best['crop_width']}x{best['crop_height']} | {best['crop_area']} | "
+                f"{best['crop']}"
+            )
 
     output_path = project_dir / Path(str(result["output"]))
     valid, validation_message = validate_output(output_path, result)

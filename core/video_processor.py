@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import time
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -12,10 +13,31 @@ import cv2
 import numpy as np
 
 from .detector import DetectorError, PlateDetector
+from .quality import PlateQualityEvaluator
+from .tracker import PlateTracker
 
 
 class VideoProcessingError(RuntimeError):
     """Raised when a video cannot be opened, processed, or written."""
+
+
+@dataclass
+class _BestCandidate:
+    track_id: int
+    best_frame: int
+    conf: float
+    quality: float
+    sharpness: float
+    sharpness_raw: float
+    brightness: float
+    brightness_raw: float
+    size: float
+    crop_width: int
+    crop_height: int
+    crop_area: int
+    aspect_ratio: float
+    box: list[int]
+    crop: np.ndarray
 
 
 class VideoProcessor:
@@ -26,8 +48,14 @@ class VideoProcessor:
         detector: PlateDetector,
         output_dir: str | Path = "output",
         project_root: str | Path | None = None,
+        tracker: PlateTracker | None = None,
+        quality_evaluator: PlateQualityEvaluator | None = None,
     ) -> None:
         self.detector = detector
+        self.tracker = tracker
+        if quality_evaluator is not None and tracker is None:
+            raise ValueError("quality_evaluator requires tracker to be enabled")
+        self.quality_evaluator = quality_evaluator
         self.project_root = Path(project_root or Path.cwd()).resolve()
         self.output_dir = Path(output_dir)
         if not self.output_dir.is_absolute():
@@ -52,7 +80,8 @@ class VideoProcessor:
                 f"Could not create output directory '{self.videos_dir}': {exc}"
             ) from exc
 
-        output_path = self.videos_dir / f"{source.stem}_result.mp4"
+        output_suffix = "_tracked.mp4" if self.tracker is not None else "_result.mp4"
+        output_path = self.videos_dir / f"{source.stem}{output_suffix}"
         if output_path.resolve() == source:
             raise VideoProcessingError("Output video must not overwrite the input video.")
 
@@ -63,6 +92,10 @@ class VideoProcessor:
 
         writer: cv2.VideoWriter | None = None
         try:
+            if self.tracker is not None:
+                self.tracker.reset()
+            if self.quality_evaluator is not None:
+                self._prepare_video_crops(source.stem)
             width = self._read_positive_int(cap, cv2.CAP_PROP_FRAME_WIDTH, "width")
             height = self._read_positive_int(cap, cv2.CAP_PROP_FRAME_HEIGHT, "height")
             fps = float(cap.get(cv2.CAP_PROP_FPS))
@@ -89,6 +122,11 @@ class VideoProcessor:
             processed_frames = 0
             total_detections = 0
             total_detect_seconds = 0.0
+            total_tracking_seconds = 0.0
+            total_quality_seconds = 0.0
+            quality_candidates = 0
+            invalid_crops = 0
+            best_candidates: dict[int, _BestCandidate] = {}
             last_progress_bucket = 0
             processing_start = time.perf_counter()
 
@@ -120,7 +158,51 @@ class VideoProcessor:
                     ) from exc
                 total_detect_seconds += time.perf_counter() - detect_start
 
-                self._draw_detections(frame, detections)
+                tracked_detections: Sequence[Mapping[str, Any]] = []
+                if self.tracker is not None:
+                    tracking_start = time.perf_counter()
+                    try:
+                        tracked_detections = self.tracker.update(
+                            detections,
+                            frame_index=processed_frames + 1,
+                        )
+                    except Exception as exc:
+                        raise VideoProcessingError(
+                            f"Tracking failed at frame {processed_frames + 1}: {exc}"
+                        ) from exc
+                    total_tracking_seconds += time.perf_counter() - tracking_start
+
+                    if self.quality_evaluator is not None:
+                        quality_start = time.perf_counter()
+                        for tracked_detection in tracked_detections:
+                            crop = self._crop_from_frame(
+                                frame,
+                                tracked_detection.get("box"),
+                            )
+                            if crop is None:
+                                invalid_crops += 1
+                                continue
+                            try:
+                                metrics = self.quality_evaluator.evaluate(
+                                    crop,
+                                    detection_confidence=tracked_detection["conf"],
+                                )
+                            except ValueError:
+                                invalid_crops += 1
+                                continue
+                            quality_candidates += 1
+                            self._update_best_candidate(
+                                best_candidates,
+                                tracked_detection,
+                                metrics,
+                                frame_index=processed_frames + 1,
+                                crop=crop,
+                            )
+                        total_quality_seconds += time.perf_counter() - quality_start
+
+                    self._draw_detections(frame, tracked_detections)
+                else:
+                    self._draw_detections(frame, detections)
                 writer.write(frame)
                 processed_frames += 1
                 total_detections += len(detections)
@@ -134,6 +216,20 @@ class VideoProcessor:
             if processed_frames == 0:
                 raise VideoProcessingError(f"Video contains no readable frames: {source}")
 
+            track_summaries: list[dict[str, int]] = []
+            if self.tracker is not None:
+                self.tracker.finalize()
+                track_summaries = self.tracker.track_summaries()
+
+            best_crop_summaries: list[dict[str, Any]] = []
+            if self.quality_evaluator is not None:
+                best_crop_summaries = self._save_best_crops(
+                    source_stem=source.stem,
+                    fps=fps,
+                    track_summaries=track_summaries,
+                    best_candidates=best_candidates,
+                )
+
             avg_detect_ms = (total_detect_seconds / processed_frames) * 1000.0
             detector_fps = (
                 processed_frames / total_detect_seconds
@@ -145,6 +241,25 @@ class VideoProcessor:
                 if total_processing_seconds > 0.0
                 else 0.0
             )
+            avg_tracking_ms = (
+                (total_tracking_seconds / processed_frames) * 1000.0
+                if self.tracker is not None
+                else 0.0
+            )
+            avg_quality_ms = (
+                (total_quality_seconds / processed_frames) * 1000.0
+                if self.quality_evaluator is not None
+                else 0.0
+            )
+            tracks_with_1_hit = sum(track["hits"] == 1 for track in track_summaries)
+            tracks_with_le_2_hits = sum(track["hits"] <= 2 for track in track_summaries)
+            tracks_with_ge_3_hits = sum(track["hits"] >= 3 for track in track_summaries)
+            longest_track = max(
+                track_summaries,
+                key=lambda track: (track["hits"], -track["track_id"]),
+                default=None,
+            )
+            best_qualities = [item["quality"] for item in best_crop_summaries]
 
             return {
                 "status": "ok",
@@ -161,6 +276,28 @@ class VideoProcessor:
                 "detector_fps": detector_fps,
                 "total_processing_time": total_processing_seconds,
                 "processing_fps": processing_fps,
+                "tracking_enabled": self.tracker is not None,
+                "avg_tracking_ms": avg_tracking_ms,
+                "total_tracks": len(track_summaries),
+                "tracks_with_1_hit": tracks_with_1_hit,
+                "tracks_with_le_2_hits": tracks_with_le_2_hits,
+                "tracks_with_ge_3_hits": tracks_with_ge_3_hits,
+                "longest_track": longest_track,
+                "tracks": track_summaries,
+                "quality_enabled": self.quality_evaluator is not None,
+                "quality_candidates": quality_candidates,
+                "invalid_crops": invalid_crops,
+                "avg_quality_ms": avg_quality_ms,
+                "tracks_with_best_crop": len(best_crop_summaries),
+                "tracks_without_valid_crop": len(track_summaries) - len(best_crop_summaries),
+                "min_best_quality": min(best_qualities) if best_qualities else None,
+                "max_best_quality": max(best_qualities) if best_qualities else None,
+                "avg_best_quality": (
+                    sum(best_qualities) / len(best_qualities)
+                    if best_qualities
+                    else None
+                ),
+                "best_crops": best_crop_summaries,
             }
         finally:
             if writer is not None:
@@ -229,7 +366,11 @@ class VideoProcessor:
             if x1 >= x2 or y1 >= y2:
                 raise VideoProcessingError(f"Detector returned an empty box: {detection!r}")
 
-            label = f"Plate {confidence:.2f}"
+            track_id = detection.get("track_id")
+            if track_id is None:
+                label = f"Plate {confidence:.2f}"
+            else:
+                label = f"Plate #{int(track_id)} | {confidence:.2f}"
             cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
             (text_width, text_height), baseline = cv2.getTextSize(
                 label,
@@ -264,6 +405,140 @@ class VideoProcessor:
                 2,
                 cv2.LINE_AA,
             )
+
+    def _prepare_video_crops(self, source_stem: str) -> None:
+        crops_dir = self.output_dir / "crops"
+        try:
+            crops_dir.mkdir(parents=True, exist_ok=True)
+            for old_crop in crops_dir.glob(f"{source_stem}_track_*.jpg"):
+                if old_crop.is_file():
+                    old_crop.unlink()
+        except OSError as exc:
+            raise VideoProcessingError(
+                f"Could not prepare video crop directory '{crops_dir}': {exc}"
+            ) from exc
+
+    @staticmethod
+    def _crop_from_frame(
+        frame: np.ndarray,
+        box: Any,
+    ) -> np.ndarray | None:
+        if not isinstance(box, Sequence) or isinstance(box, (str, bytes)) or len(box) != 4:
+            return None
+        try:
+            coordinates = [int(round(float(value))) for value in box]
+        except (TypeError, ValueError, OverflowError):
+            return None
+        height, width = frame.shape[:2]
+        x1, y1, x2, y2 = coordinates
+        x1 = max(0, min(width - 1, x1))
+        y1 = max(0, min(height - 1, y1))
+        x2 = max(0, min(width, x2))
+        y2 = max(0, min(height, y2))
+        if x1 >= x2 or y1 >= y2:
+            return None
+        crop = frame[y1:y2, x1:x2]
+        if crop.size == 0 or crop.shape[0] <= 0 or crop.shape[1] <= 0:
+            return None
+        return crop.copy()
+
+    @staticmethod
+    def _update_best_candidate(
+        best_candidates: dict[int, _BestCandidate],
+        detection: Mapping[str, Any],
+        metrics: Mapping[str, Any],
+        frame_index: int,
+        crop: np.ndarray,
+    ) -> None:
+        track_id = int(detection["track_id"])
+        candidate = _BestCandidate(
+            track_id=track_id,
+            best_frame=frame_index,
+            conf=float(detection["conf"]),
+            quality=float(metrics["quality"]),
+            sharpness=float(metrics["sharpness"]),
+            sharpness_raw=float(metrics["sharpness_raw"]),
+            brightness=float(metrics["brightness"]),
+            brightness_raw=float(metrics["brightness_raw"]),
+            size=float(metrics["size"]),
+            crop_width=int(metrics["crop_width"]),
+            crop_height=int(metrics["crop_height"]),
+            crop_area=int(metrics["crop_area"]),
+            aspect_ratio=float(metrics["aspect_ratio"]),
+            box=[int(value) for value in detection["box"]],
+            crop=crop,
+        )
+        current = best_candidates.get(track_id)
+        if current is None or VideoProcessor._is_better_candidate(candidate, current):
+            best_candidates[track_id] = candidate
+
+    @staticmethod
+    def _is_better_candidate(
+        candidate: _BestCandidate,
+        current: _BestCandidate,
+    ) -> bool:
+        # Deterministic tie-break order: quality, sharpness, confidence, then
+        # earlier frame. The frame is not used to influence tracking itself.
+        candidate_key = (
+            candidate.quality,
+            candidate.sharpness,
+            candidate.conf,
+            -candidate.best_frame,
+        )
+        current_key = (
+            current.quality,
+            current.sharpness,
+            current.conf,
+            -current.best_frame,
+        )
+        return candidate_key > current_key
+
+    def _save_best_crops(
+        self,
+        source_stem: str,
+        fps: float,
+        track_summaries: Sequence[Mapping[str, int]],
+        best_candidates: Mapping[int, _BestCandidate],
+    ) -> list[dict[str, Any]]:
+        crops_dir = self.output_dir / "crops"
+        saved: list[dict[str, Any]] = []
+        for track in track_summaries:
+            track_id = int(track["track_id"])
+            candidate = best_candidates.get(track_id)
+            if candidate is None:
+                continue
+
+            crop_path = crops_dir / f"{source_stem}_track_{track_id:04d}.jpg"
+            if not cv2.imwrite(str(crop_path), candidate.crop):
+                raise VideoProcessingError(f"Could not save best crop: {crop_path}")
+            saved_crop = cv2.imread(str(crop_path), cv2.IMREAD_COLOR)
+            if saved_crop is None or saved_crop.size == 0:
+                raise VideoProcessingError(f"Saved best crop could not be reopened: {crop_path}")
+
+            saved.append(
+                {
+                    "track_id": track_id,
+                    "first_frame": int(track["first_frame"]),
+                    "last_frame": int(track["last_frame"]),
+                    "hits": int(track["hits"]),
+                    "best_frame": candidate.best_frame,
+                    "best_time": (candidate.best_frame - 1) / fps,
+                    "conf": candidate.conf,
+                    "quality": candidate.quality,
+                    "sharpness": candidate.sharpness,
+                    "sharpness_raw": candidate.sharpness_raw,
+                    "brightness": candidate.brightness,
+                    "brightness_raw": candidate.brightness_raw,
+                    "size": candidate.size,
+                    "crop_width": candidate.crop_width,
+                    "crop_height": candidate.crop_height,
+                    "crop_area": candidate.crop_area,
+                    "aspect_ratio": candidate.aspect_ratio,
+                    "box": candidate.box,
+                    "crop": self._project_relative_path(crop_path),
+                }
+            )
+        return saved
 
     def _project_relative_path(self, path: Path) -> str:
         try:
