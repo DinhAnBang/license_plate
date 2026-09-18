@@ -2,6 +2,7 @@
 
 from .detector import Detection, DetectorError, PlateDetector
 from .image_processor import ImageProcessingError, ImageProcessor
+from .video_processor import VideoProcessingError, VideoProcessor
 
 __all__ = [
     "Detection",
@@ -9,4 +10,6 @@ __all__ = [
     "ImageProcessingError",
     "ImageProcessor",
     "PlateDetector",
+    "VideoProcessingError",
+    "VideoProcessor",
 ]
