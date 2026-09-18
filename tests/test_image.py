@@ -10,7 +10,7 @@ from core.detector import DetectorError, PlateDetector
 
 
 def main() -> int:
-    project_dir = Path(__file__).resolve().parent
+    project_dir = Path(__file__).resolve().parents[1]
     model_path = project_dir / "models" / "best.onnx"
     image_path = project_dir / "input" / "images1.jpg"
     output_path = project_dir / "output" / "images" / "images1_result.jpg"

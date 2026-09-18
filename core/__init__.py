@@ -3,6 +3,7 @@
 from .detector import Detection, DetectorError, PlateDetector
 from .image_processor import ImageProcessingError, ImageProcessor
 from .quality import PlateQualityEvaluator, QualityMetrics
+from .result_writer import VideoResultError, VideoResultWriter
 from .tracker import PlateTracker, Track, TrackedDetection, calculate_iou
 from .video_processor import VideoProcessingError, VideoProcessor
 
@@ -15,6 +16,8 @@ __all__ = [
     "PlateQualityEvaluator",
     "PlateTracker",
     "QualityMetrics",
+    "VideoResultError",
+    "VideoResultWriter",
     "Track",
     "TrackedDetection",
     "VideoProcessingError",

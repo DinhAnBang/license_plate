@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 import cv2
 
 from core.detector import DetectorError, PlateDetector
 from core.quality import PlateQualityEvaluator
+from core.result_writer import VideoResultWriter
 from core.tracker import PlateTracker
 from core.video_processor import VideoProcessingError, VideoProcessor
 
@@ -55,12 +57,19 @@ def main() -> int:
         action="store_true",
         help="enable Phase 5 best-crop quality evaluation; tracking is enabled automatically",
     )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="write and validate the official Phase 6 video JSON",
+    )
+    parser.add_argument("--model", type=Path, help="Detector ONNX path for testing.")
     args = parser.parse_args()
-    if args.quality:
+    if args.quality or args.json:
+        args.quality = True
         args.tracking = True
 
-    project_dir = Path(__file__).resolve().parent
-    model_path = project_dir / "models" / "best.onnx"
+    project_dir = Path(__file__).resolve().parents[1]
+    model_path = args.model or project_dir / "models" / "best.onnx"
     source_path = (
         project_dir
         / "input"
@@ -73,6 +82,7 @@ def main() -> int:
     print(f"Source: {source_path.relative_to(project_dir)}")
     print(f"Tracking: {'ON' if args.tracking else 'OFF'}")
     print(f"Quality: {'ON' if args.quality else 'OFF'}")
+    print(f"Official JSON: {'ON' if args.json else 'OFF'}")
 
     try:
         detector = PlateDetector(
@@ -95,12 +105,21 @@ def main() -> int:
             if args.quality
             else None
         )
+        result_writer = (
+            VideoResultWriter(
+                output_dir=project_dir / "output" / "json",
+                project_root=project_dir,
+            )
+            if args.json
+            else None
+        )
         processor = VideoProcessor(
             detector,
             output_dir=project_dir / "output",
             project_root=project_dir,
             tracker=tracker,
             quality_evaluator=quality_evaluator,
+            result_writer=result_writer,
         )
         result = processor.process(source_path)
     except (DetectorError, VideoProcessingError, ValueError) as exc:
@@ -184,8 +203,31 @@ def main() -> int:
     print("\n------------------------------------")
     print(f"Output: {result['output']}")
     print(f"Output validation: {'OK - ' if valid else 'FAILED - '}{validation_message}")
+    if args.json:
+        json_path = project_dir / Path(str(result["json"]))
+        print(f"JSON: {result['json']}")
+        print("\nOfficial JSON:")
+        print(json_path.read_text(encoding="utf-8"))
+        official = json.loads(json_path.read_text(encoding="utf-8"))
+        assert official["status"] == "ok" and official["type"] == "video"
+        assert official["count"] == len(official["plates"])
+        for plate in official["plates"]:
+            assert {"id", "first", "last", "hits", "best_frame", "time", "conf", "quality", "box", "crop", "raw_text", "text", "ocr_conf"}.issubset(plate)
+            assert plate["first"] <= plate["best_frame"] <= plate["last"]
+            assert plate["time"] == round((plate["best_frame"] - 1) / official["fps"], 6)
+            assert (project_dir / plate["crop"]).is_file()
+        assert result["ocr_calls"] <= len(official["plates"]) * processor.top_k
+        assert processor.ocr.session_creation_count == 1
+        print("\nTOP-K OCR REPORT")
+        for track in result["ocr_report"]:
+            print(f"Track ID: {track['track_id']} | Candidates retained: {track['candidates_retained']}")
+            for index, candidate in enumerate(track["candidates"], start=1):
+                print(f"  Candidate {index}: frame={candidate['frame']} quality={candidate['quality']:.4f} det_conf={candidate['det_conf']:.4f} raw={candidate['raw_text']} text={candidate['text']} ocr_conf={candidate['ocr_conf']:.4f} vote_weight={candidate['vote_weight']:.4f}")
+            print(f"  Winner: text={track['winner']['text']} frame={track['winner']['frame']} weight={track['winner']['weight']:.4f}")
+        print(f"JSON: PASS | Detector sessions: 1 | OCR sessions: 1 | OCR calls: {result['ocr_calls']}")
+        print(f"Average OCR: {result['avg_ocr_ms']:.2f} ms")
     print("Status: OK" if valid else "Status: FAILED")
-    return 0 if valid else 1
+    return 0 if valid and (not args.json or json_path.is_file()) else 1
 
 
 if __name__ == "__main__":

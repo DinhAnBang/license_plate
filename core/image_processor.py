@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
+import time
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -12,6 +14,11 @@ import cv2
 import numpy as np
 
 from .detector import Detection, DetectorError, PlateDetector
+from .ocr import MicroCharNetOCR
+from .plate_normalizer import PlateNormalizer
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class ImageProcessingError(RuntimeError):
@@ -26,9 +33,17 @@ class ImageProcessor:
         detector: PlateDetector,
         output_dir: str | Path = "output",
         project_root: str | Path | None = None,
+        ocr: MicroCharNetOCR | None = None,
+        write_json: bool = True,
     ) -> None:
         self.detector = detector
         self.project_root = Path(project_root or Path.cwd()).resolve()
+        self.ocr = ocr if ocr is not None else MicroCharNetOCR(
+            self.project_root / "models" / "OCR" / "microcharnet.onnx"
+        )
+        self.ocr_calls = 0
+        self.ocr_total_ms = 0.0
+        self.write_json = write_json
         self.output_dir = Path(output_dir)
         if not self.output_dir.is_absolute():
             self.output_dir = self.project_root / self.output_dir
@@ -53,6 +68,8 @@ class ImageProcessor:
             raise ImageProcessingError(f"OpenCV could not read image: {source}")
 
         height, width = image.shape[:2]
+        self.ocr_calls = 0
+        self.ocr_total_ms = 0.0
         stem = source.stem
         self._create_output_dirs()
         self._remove_old_crops(stem)
@@ -79,6 +96,21 @@ class ImageProcessor:
                 continue
 
             plate_id = len(plates) + 1
+            raw_text = ""
+            ocr_conf = 0.0
+            ocr_start = time.perf_counter()
+            self.ocr_calls += 1
+            try:
+                ocr_result = self.ocr.recognize(crop)
+                raw_text = str(ocr_result["text"])
+                ocr_conf = float(ocr_result["confidence"])
+            except Exception as exc:
+                LOGGER.warning("OCR failed for image %s plate %d: %s", source.name, plate_id, exc)
+            finally:
+                self.ocr_total_ms += (time.perf_counter() - ocr_start) * 1000.0
+            normalized_text = PlateNormalizer.normalize(raw_text)
+            if not normalized_text:
+                ocr_conf = 0.0
             crop_path = self.crops_dir / f"{stem}_{plate_id:03d}.jpg"
             if not cv2.imwrite(str(crop_path), crop):
                 raise ImageProcessingError(f"Could not save crop: {crop_path}")
@@ -91,6 +123,9 @@ class ImageProcessor:
                     "conf": confidence,
                     "box": box,
                     "crop": crop_relative,
+                    "raw_text": raw_text,
+                    "text": normalized_text,
+                    "ocr_conf": round(ocr_conf, 6),
                 }
             )
             self._draw_detection(annotated, plate_id, confidence, box)
@@ -108,7 +143,13 @@ class ImageProcessor:
             "plates": plates,
         }
         json_path = self.json_dir / f"{stem}.json"
-        self._write_json(json_path, result)
+        if self.write_json:
+            self._write_json(json_path, result)
+        elif json_path.is_file():
+            try:
+                json_path.unlink()
+            except OSError as exc:
+                raise ImageProcessingError(f"Could not remove stale JSON '{json_path}': {exc}") from exc
         return result
 
     def _create_output_dirs(self) -> None:

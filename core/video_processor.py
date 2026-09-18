@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import logging
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -13,8 +14,15 @@ import cv2
 import numpy as np
 
 from .detector import DetectorError, PlateDetector
+from .ocr import MicroCharNetOCR
+from .ocr_voter import OCRVoter
+from .plate_normalizer import PlateNormalizer
 from .quality import PlateQualityEvaluator
+from .result_writer import VideoResultError, VideoResultWriter
 from .tracker import PlateTracker
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class VideoProcessingError(RuntimeError):
@@ -50,13 +58,29 @@ class VideoProcessor:
         project_root: str | Path | None = None,
         tracker: PlateTracker | None = None,
         quality_evaluator: PlateQualityEvaluator | None = None,
+        result_writer: VideoResultWriter | None = None,
+        ocr: MicroCharNetOCR | None = None,
+        top_k: int = 3,
+        write_json: bool = True,
     ) -> None:
         self.detector = detector
         self.tracker = tracker
         if quality_evaluator is not None and tracker is None:
             raise ValueError("quality_evaluator requires tracker to be enabled")
+        if result_writer is not None and quality_evaluator is None:
+            raise ValueError("result_writer requires quality_evaluator to be enabled")
         self.quality_evaluator = quality_evaluator
+        self.result_writer = result_writer
+        self.write_json = write_json
+        if not isinstance(top_k, int) or top_k < 1:
+            raise ValueError("top_k must be a positive integer")
+        self.top_k = top_k
         self.project_root = Path(project_root or Path.cwd()).resolve()
+        self.ocr = (
+            ocr if ocr is not None else MicroCharNetOCR(self.project_root / "models" / "OCR" / "microcharnet.onnx")
+        ) if quality_evaluator is not None else None
+        self.ocr_calls = 0
+        self.ocr_total_ms = 0.0
         self.output_dir = Path(output_dir)
         if not self.output_dir.is_absolute():
             self.output_dir = self.project_root / self.output_dir
@@ -96,6 +120,8 @@ class VideoProcessor:
                 self.tracker.reset()
             if self.quality_evaluator is not None:
                 self._prepare_video_crops(source.stem)
+            if self.result_writer is not None:
+                self.result_writer.prepare(source)
             width = self._read_positive_int(cap, cv2.CAP_PROP_FRAME_WIDTH, "width")
             height = self._read_positive_int(cap, cv2.CAP_PROP_FRAME_HEIGHT, "height")
             fps = float(cap.get(cv2.CAP_PROP_FPS))
@@ -126,7 +152,10 @@ class VideoProcessor:
             total_quality_seconds = 0.0
             quality_candidates = 0
             invalid_crops = 0
-            best_candidates: dict[int, _BestCandidate] = {}
+            best_candidates: dict[int, list[_BestCandidate]] = {}
+            self.ocr_calls = 0
+            self.ocr_total_ms = 0.0
+            ocr_report: list[dict[str, Any]] = []
             last_progress_bucket = 0
             processing_start = time.perf_counter()
 
@@ -212,7 +241,6 @@ class VideoProcessor:
                     last_progress_bucket,
                 )
 
-            total_processing_seconds = time.perf_counter() - processing_start
             if processed_frames == 0:
                 raise VideoProcessingError(f"Video contains no readable frames: {source}")
 
@@ -228,7 +256,10 @@ class VideoProcessor:
                     fps=fps,
                     track_summaries=track_summaries,
                     best_candidates=best_candidates,
+                    ocr_report=ocr_report,
                 )
+
+            total_processing_seconds = time.perf_counter() - processing_start
 
             avg_detect_ms = (total_detect_seconds / processed_frames) * 1000.0
             detector_fps = (
@@ -261,7 +292,7 @@ class VideoProcessor:
             )
             best_qualities = [item["quality"] for item in best_crop_summaries]
 
-            return {
+            result: dict[str, Any] = {
                 "status": "ok",
                 "source": self._project_relative_path(source),
                 "output": self._project_relative_path(output_path),
@@ -298,7 +329,29 @@ class VideoProcessor:
                     else None
                 ),
                 "best_crops": best_crop_summaries,
+                "ocr_report": ocr_report,
+                "ocr_calls": self.ocr_calls,
+                "avg_ocr_ms": self.ocr_total_ms / self.ocr_calls if self.ocr_calls else 0.0,
             }
+            if self.result_writer is not None:
+                try:
+                    official_result = self.result_writer.build_result(
+                        source_path=source,
+                        width=width,
+                        height=height,
+                        fps=fps,
+                        frames=frame_count,
+                        plates=best_crop_summaries,
+                    )
+                    result["official_result"] = official_result
+                    if self.write_json:
+                        result["json"] = self.result_writer.write_built_result(
+                            source_path=source,
+                            result=official_result,
+                        )
+                except VideoResultError as exc:
+                    raise VideoProcessingError(f"Could not create official video JSON: {exc}") from exc
+            return result
         finally:
             if writer is not None:
                 writer.release()
@@ -442,9 +495,9 @@ class VideoProcessor:
             return None
         return crop.copy()
 
-    @staticmethod
     def _update_best_candidate(
-        best_candidates: dict[int, _BestCandidate],
+        self,
+        best_candidates: dict[int, list[_BestCandidate]],
         detection: Mapping[str, Any],
         metrics: Mapping[str, Any],
         frame_index: int,
@@ -468,9 +521,13 @@ class VideoProcessor:
             box=[int(value) for value in detection["box"]],
             crop=crop,
         )
-        current = best_candidates.get(track_id)
-        if current is None or VideoProcessor._is_better_candidate(candidate, current):
-            best_candidates[track_id] = candidate
+        retained = best_candidates.setdefault(track_id, [])
+        retained.append(candidate)
+        retained.sort(
+            key=lambda item: (item.quality, item.sharpness, item.conf, -item.best_frame),
+            reverse=True,
+        )
+        del retained[self.top_k:]
 
     @staticmethod
     def _is_better_candidate(
@@ -498,15 +555,66 @@ class VideoProcessor:
         source_stem: str,
         fps: float,
         track_summaries: Sequence[Mapping[str, int]],
-        best_candidates: Mapping[int, _BestCandidate],
+        best_candidates: Mapping[int, list[_BestCandidate]],
+        ocr_report: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
         crops_dir = self.output_dir / "crops"
         saved: list[dict[str, Any]] = []
         for track in track_summaries:
             track_id = int(track["track_id"])
-            candidate = best_candidates.get(track_id)
-            if candidate is None:
+            retained = best_candidates.get(track_id, [])
+            if not retained:
                 continue
+
+            voted_candidates: list[dict[str, Any]] = []
+            for candidate in retained:
+                raw_text = ""
+                ocr_conf = 0.0
+                if self.ocr is not None:
+                    ocr_start = time.perf_counter()
+                    self.ocr_calls += 1
+                    try:
+                        ocr_result = self.ocr.recognize(candidate.crop)
+                        raw_text = str(ocr_result["text"])
+                        ocr_conf = float(ocr_result["confidence"])
+                    except Exception as exc:
+                        LOGGER.warning("OCR failed for track %d frame %d: %s", track_id, candidate.best_frame, exc)
+                    finally:
+                        self.ocr_total_ms += (time.perf_counter() - ocr_start) * 1000.0
+                normalized_text = PlateNormalizer.normalize(raw_text)
+                if not normalized_text:
+                    ocr_conf = 0.0
+                voted_candidates.append({
+                    "raw_text": raw_text,
+                    "text": normalized_text,
+                    "ocr_conf": ocr_conf,
+                    "quality": candidate.quality,
+                })
+
+            vote = OCRVoter.vote(voted_candidates)
+            winner_index = vote["winner_index"]
+            # If every OCR is empty, keep the highest-quality crop and track.
+            selected_index = winner_index if winner_index is not None else 0
+            candidate = retained[selected_index]
+            ocr_report.append({
+                "track_id": track_id,
+                "candidates_retained": len(retained),
+                "candidates": [
+                    {
+                        "frame": item.best_frame,
+                        "quality": item.quality,
+                        "det_conf": item.conf,
+                        **ocr_item,
+                        "vote_weight": OCRVoter.weight(ocr_item) if ocr_item["text"] else 0.0,
+                    }
+                    for item, ocr_item in zip(retained, voted_candidates)
+                ],
+                "winner": {
+                    "text": vote["text"],
+                    "frame": candidate.best_frame,
+                    "weight": vote["vote_weight"],
+                },
+            })
 
             crop_path = crops_dir / f"{source_stem}_track_{track_id:04d}.jpg"
             if not cv2.imwrite(str(crop_path), candidate.crop):
@@ -536,6 +644,9 @@ class VideoProcessor:
                     "aspect_ratio": candidate.aspect_ratio,
                     "box": candidate.box,
                     "crop": self._project_relative_path(crop_path),
+                    "raw_text": vote["raw_text"],
+                    "text": vote["text"],
+                    "ocr_conf": vote["ocr_conf"],
                 }
             )
         return saved
