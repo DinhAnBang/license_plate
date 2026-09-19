@@ -5,3 +5,9 @@ input/*.mp4
 build/
 dist/
 venv_runtime/
+# AI models - local only
+*.onnx
+*.pt
+
+# local model backups
+local_backup/
