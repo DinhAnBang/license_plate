@@ -27,3 +27,19 @@ python -m tests.test_engine_live
 ```
 
 `tests/` contains development checks. `tools/inspect_model.py` and `tools/convert_pt_to_onnx.py` are development utilities; `.pt` conversion needs separate Torch/Ultralytics dependencies and is not used by the runtime.
+
+## PyInstaller one-file build
+
+Build the console engine (stdin/stdout must remain available) from the project root:
+
+```powershell
+python -m PyInstaller --clean --noconfirm LicensePlateEngine.spec
+```
+
+The spec bundles only the two ONNX model resources. In source mode, resources and output use the project root. In one-file mode, models are read from PyInstaller's temporary resource root while persistent output is written beside the executable at `dist/output/requests/`.
+
+Run the real executable persistence test after rebuilding:
+
+```powershell
+python -B -m tests.test_frozen_executable
+```

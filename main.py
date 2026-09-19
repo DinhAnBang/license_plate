@@ -26,7 +26,7 @@ def main() -> int:
     parser.add_argument("--no-json-files", action="store_true", help="Return results in memory without saving JSON files.")
     args = parser.parse_args()
 
-    logging.basicConfig(level=logging.WARNING, stream=sys.stderr)
+    logging.basicConfig(level=logging.INFO, stream=sys.stderr)
     emit({"event": "starting"})
     try:
         engine = AIPlateEngine(

@@ -19,6 +19,7 @@ from core.video_processor import VideoProcessor
 
 from .protocol import ProtocolError, error_response, validate_request
 from .output_manager import RequestOutputManager
+from .runtime_paths import get_app_root, get_output_root, get_resource_root
 
 
 LOGGER = logging.getLogger(__name__)
@@ -42,14 +43,19 @@ class AIPlateEngine:
         detector: PlateDetector | None = None,
         ocr: MicroCharNetOCR | None = None,
         write_json: bool = True,
+        resource_root: str | Path | None = None,
     ) -> None:
-        self.project_root = Path(project_root or Path(__file__).resolve().parents[1]).resolve()
-        self.detector_model = self._resolve_path(detector_model)
-        self.ocr_model = self._resolve_path(ocr_model)
+        self.resource_root = Path(resource_root).resolve() if resource_root is not None else get_resource_root()
+        self.app_root = Path(project_root).resolve() if project_root is not None else get_app_root()
+        # Keep this alias for the Phase 1-10 processors, where it means the
+        # persistent root used to resolve inputs and generated artifacts.
+        self.project_root = self.app_root
+        self.detector_model = self._resolve_model_path(detector_model)
+        self.ocr_model = self._resolve_model_path(ocr_model)
         self.detector = detector
         self.ocr = ocr
         self.write_json = write_json
-        self.output_manager = RequestOutputManager(self.project_root)
+        self.output_manager = RequestOutputManager(self.app_root)
         self.image_processor: ImageProcessor | None = None
         self.video_processor: VideoProcessor | None = None
         self.state = self.STOPPED
@@ -57,9 +63,13 @@ class AIPlateEngine:
         self.detector_warmed = False
         self.ocr_warmed = False
 
-    def _resolve_path(self, value: str | Path) -> Path:
+    def _resolve_model_path(self, value: str | Path) -> Path:
         path = Path(value)
-        return (path if path.is_absolute() else self.project_root / path).resolve()
+        return (path if path.is_absolute() else self.resource_root / path).resolve()
+
+    def _resolve_input_path(self, value: str | Path) -> Path:
+        path = Path(value)
+        return (path if path.is_absolute() else self.app_root / path).resolve()
 
     def startup(self) -> None:
         if self.state != self.STOPPED:
@@ -67,6 +77,11 @@ class AIPlateEngine:
         started = time.perf_counter()
         self.state = self.STARTING
         try:
+            LOGGER.info("Resource root: %s", self.resource_root)
+            LOGGER.info("App root: %s", self.app_root)
+            LOGGER.info("Detector model: %s", self.detector_model)
+            LOGGER.info("OCR model: %s", self.ocr_model)
+            LOGGER.info("Output root: %s", get_output_root(self.app_root))
             if self.detector is None:
                 if not self.detector_model.is_file():
                     raise FileNotFoundError(f"Detector model not found: {self.detector_model}")
@@ -153,7 +168,7 @@ class AIPlateEngine:
             self.state = self.SHUTTING_DOWN
             return {"id": request_id, "status": "ok", "state": self.SHUTTING_DOWN}
 
-        source = self._resolve_path(request["path"])
+        source = self._resolve_input_path(request["path"])
         if not source.is_file():
             return error_response(request_id, "INPUT_NOT_FOUND", f"Input file not found: {source}")
 
