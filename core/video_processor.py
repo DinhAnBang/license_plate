@@ -8,7 +8,7 @@ import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import cv2
 import numpy as np
@@ -20,6 +20,9 @@ from .plate_normalizer import PlateNormalizer
 from .quality import PlateQualityEvaluator
 from .result_writer import VideoResultError, VideoResultWriter
 from .tracker import PlateTracker
+
+if TYPE_CHECKING:
+    from engine.output_manager import RequestOutputPaths
 
 
 LOGGER = logging.getLogger(__name__)
@@ -87,7 +90,9 @@ class VideoProcessor:
         self.output_dir = self.output_dir.resolve()
         self.videos_dir = self.output_dir / "videos"
 
-    def process(self, source_path: str | Path) -> dict[str, Any]:
+    def process(
+        self, source_path: str | Path, *, output_paths: RequestOutputPaths | None = None
+    ) -> dict[str, Any]:
         """Detect and draw all plates in every frame, then write an output video."""
 
         source = Path(source_path)
@@ -97,15 +102,18 @@ class VideoProcessor:
         if not source.is_file():
             raise VideoProcessingError(f"Input video does not exist: {source}")
 
-        try:
-            self.videos_dir.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            raise VideoProcessingError(
-                f"Could not create output directory '{self.videos_dir}': {exc}"
-            ) from exc
-
-        output_suffix = "_tracked.mp4" if self.tracker is not None else "_result.mp4"
-        output_path = self.videos_dir / f"{source.stem}{output_suffix}"
+        if output_paths is None:
+            try:
+                self.videos_dir.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                raise VideoProcessingError(
+                    f"Could not create output directory '{self.videos_dir}': {exc}"
+                ) from exc
+            # Development-only direct calls retain the Phase 3-10 output names.
+            output_suffix = "_tracked.mp4" if self.tracker is not None else "_result.mp4"
+            output_path = self.videos_dir / f"{source.stem}{output_suffix}"
+        else:
+            output_path = output_paths.annotated
         if output_path.resolve() == source:
             raise VideoProcessingError("Output video must not overwrite the input video.")
 
@@ -119,9 +127,12 @@ class VideoProcessor:
             if self.tracker is not None:
                 self.tracker.reset()
             if self.quality_evaluator is not None:
-                self._prepare_video_crops(source.stem)
+                if output_paths is None:
+                    self._prepare_video_crops(source.stem)
             if self.result_writer is not None:
-                self.result_writer.prepare(source)
+                self.result_writer.prepare(
+                    source, json_path=output_paths.result_json if output_paths is not None else None
+                )
             width = self._read_positive_int(cap, cv2.CAP_PROP_FRAME_WIDTH, "width")
             height = self._read_positive_int(cap, cv2.CAP_PROP_FRAME_HEIGHT, "height")
             fps = float(cap.get(cv2.CAP_PROP_FPS))
@@ -253,6 +264,7 @@ class VideoProcessor:
             if self.quality_evaluator is not None:
                 best_crop_summaries = self._save_best_crops(
                     source_stem=source.stem,
+                    output_paths=output_paths,
                     fps=fps,
                     track_summaries=track_summaries,
                     best_candidates=best_candidates,
@@ -342,12 +354,14 @@ class VideoProcessor:
                         fps=fps,
                         frames=frame_count,
                         plates=best_crop_summaries,
+                        request_id=output_paths.request_id if output_paths is not None else None,
                     )
                     result["official_result"] = official_result
                     if self.write_json:
                         result["json"] = self.result_writer.write_built_result(
                             source_path=source,
                             result=official_result,
+                            json_path=output_paths.result_json if output_paths is not None else None,
                         )
                 except VideoResultError as exc:
                     raise VideoProcessingError(f"Could not create official video JSON: {exc}") from exc
@@ -553,12 +567,13 @@ class VideoProcessor:
     def _save_best_crops(
         self,
         source_stem: str,
+        output_paths: RequestOutputPaths | None,
         fps: float,
         track_summaries: Sequence[Mapping[str, int]],
         best_candidates: Mapping[int, list[_BestCandidate]],
         ocr_report: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
-        crops_dir = self.output_dir / "crops"
+        crops_dir = output_paths.crops_dir if output_paths is not None else self.output_dir / "crops"
         saved: list[dict[str, Any]] = []
         for track in track_summaries:
             track_id = int(track["track_id"])
@@ -616,7 +631,10 @@ class VideoProcessor:
                 },
             })
 
-            crop_path = crops_dir / f"{source_stem}_track_{track_id:04d}.jpg"
+            crop_path = (
+                crops_dir / f"track_{track_id:04d}.jpg"
+                if output_paths is not None else crops_dir / f"{source_stem}_track_{track_id:04d}.jpg"
+            )
             if not cv2.imwrite(str(crop_path), candidate.crop):
                 raise VideoProcessingError(f"Could not save best crop: {crop_path}")
             saved_crop = cv2.imread(str(crop_path), cv2.IMREAD_COLOR)

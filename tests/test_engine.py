@@ -95,7 +95,8 @@ def test_shared_lifetime(root: Path) -> None:
     assert engine.state == engine.READY
     good = engine.handle_request({"id": "good", "action": "process", "type": "image", "path": "input/a.jpg"})
     assert good["result"]["plates"][0]["text"] == "72A16231"
-    assert not (root / "output/json/a.json").exists()
+    assert not (root / "output/requests/good/result.json").exists()
+    assert not (root / "output/requests/fail").exists()
     engine.shutdown()
     assert engine.state == engine.STOPPED
 
@@ -111,6 +112,7 @@ def test_json_lines(root: Path) -> None:
         {"id": "004", "action": "unknown"},
         {"id": "004a", "action": "process", "type": "image"},
         {"id": "004b", "action": "process", "type": "audio", "path": "input/a.jpg"},
+        {"id": "../escape", "action": "process", "type": "image", "path": "input/a.jpg"},
         {"id": "005", "action": "process", "type": "image", "path": "input/a.jpg"},
         {"id": "006", "action": "process", "type": "image", "path": "input/missing.jpg"},
         {"id": "007", "action": "process", "type": "image", "path": "input/b.jpg"},
@@ -119,7 +121,7 @@ def test_json_lines(root: Path) -> None:
         {"id": "010", "action": "shutdown"},
     ]
     lines = [json.dumps(item) for item in requests]
-    lines.insert(6, "{broken")
+    lines.insert(7, "{broken")
     stdin = io.StringIO("\n".join(lines) + "\n")
     stdout = io.StringIO()
     stderr = io.StringIO()
@@ -138,12 +140,13 @@ def test_json_lines(root: Path) -> None:
     assert objects[:2] == [{"event": "starting"}, {"event": "ready"}]
     responses = objects[2:]
     expected_ids = [item["id"] for item in requests]
-    expected_ids.insert(6, None)
+    expected_ids.insert(7, None)
     assert [item["id"] for item in responses] == expected_ids
     by_id = {item["id"]: item for item in responses}
     assert by_id["004"]["error"]["code"] == "UNSUPPORTED_ACTION"
     assert by_id["004a"]["error"]["code"] == "INVALID_REQUEST"
     assert by_id["004b"]["error"]["code"] == "UNSUPPORTED_TYPE"
+    assert by_id["../escape"]["error"]["code"] == "INVALID_REQUEST_ID"
     assert by_id[None]["error"]["code"] == "INVALID_REQUEST"
     assert by_id["006"]["error"]["code"] == "INPUT_NOT_FOUND"
     assert all(by_id[key]["status"] == "ok" for key in ("005", "007", "008", "009"))
@@ -156,14 +159,16 @@ def test_json_lines(root: Path) -> None:
     video_result = by_id["008"]["result"]
     assert image_result["type"] == "image" and image_result["count"] == 1
     assert video_result["type"] == "video" and video_result["count"] == 1
+    assert image_result["request_id"] == "002" and video_result["request_id"] == "008"
     assert "ocr_report" not in video_result and "candidates" not in video_result["plates"][0]
-    assert (root / "output/images/a_result.jpg").is_file()
+    assert (root / "output/requests/002/annotated.jpg").is_file()
     assert (root / image_result["plates"][0]["crop"]).is_file()
-    assert (root / "output/videos/v_tracked.mp4").is_file()
+    assert (root / "output/requests/008/annotated.mp4").is_file()
     assert (root / video_result["plates"][0]["crop"]).is_file()
-    for name, result in (("a", image_result), ("v", video_result)):
-        saved = json.loads((root / f"output/json/{name}.json").read_text(encoding="utf-8"))
+    for request_id, result in (("002", image_result), ("008", video_result)):
+        saved = json.loads((root / f"output/requests/{request_id}/result.json").read_text(encoding="utf-8"))
         assert saved == result
+    assert not (root / "output/escape").exists()
 
 
 def main() -> int:

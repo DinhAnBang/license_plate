@@ -27,13 +27,13 @@ def main() -> int:
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.WARNING, stream=sys.stderr)
-    engine = AIPlateEngine(
-        detector_model=args.detector_model,
-        ocr_model=args.ocr_model,
-        write_json=not args.no_json_files,
-    )
     emit({"event": "starting"})
     try:
+        engine = AIPlateEngine(
+            detector_model=args.detector_model,
+            ocr_model=args.ocr_model,
+            write_json=not args.no_json_files,
+        )
         with redirect_stdout(sys.stderr):
             engine.startup()
     except Exception as exc:

@@ -16,12 +16,13 @@ The engine loads `models/best.onnx` and `models/OCR/microcharnet.onnx` once, war
 {"id":"4","action":"shutdown"}
 ```
 
-Each request gets one JSON response line in arrival order. Progress and diagnostics go to stderr; stdout contains only JSON Lines. Image/video results are returned directly from memory. Annotated media and crops are written under `output/`; JSON copies are written under `output/json/` unless `--no-json-files` is set. Reprocessing the same source overwrites its output and removes stale crops/JSON for that source stem. Use distinct source stems when processing different files to avoid output name collisions.
+Each request gets one JSON response line in arrival order. Progress and diagnostics go to stderr; stdout contains only JSON Lines. Image/video results are returned directly from memory. Engine artifacts use `output/requests/<request_id>/`: `annotated.jpg` or `annotated.mp4`, `crops/plate_001.jpg` or `crops/track_0001.jpg`, and `result.json` unless `--no-json-files` is set. The result dict includes `request_id`, and generated artifact paths use project-relative forward slashes. Request IDs must be 1–80 ASCII letters, digits, hyphens, or underscores. Reusing an ID clears only that ID's output directory before processing; a failed request's partial directory is removed. Different IDs never share output paths, even when source filenames match.
 
 To run the engine contract tests and real-model integration test:
 
 ```powershell
 python -m tests.test_engine
+python -m tests.test_output_namespace
 python -m tests.test_engine_live
 ```
 

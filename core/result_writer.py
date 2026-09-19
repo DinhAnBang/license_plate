@@ -29,19 +29,22 @@ class VideoResultWriter:
             self.output_dir = self.project_root / self.output_dir
         self.output_dir = self.output_dir.resolve()
 
-    def prepare(self, source_path: str | Path) -> Path:
-        """Remove only the previous JSON for this exact video stem."""
+    def prepare(self, source_path: str | Path, *, json_path: str | Path | None = None) -> Path:
+        """Remove only the previous JSON at the selected output path."""
 
-        json_path = self.path_for(source_path)
+        json_path = self.path_for(source_path, json_path=json_path)
         try:
-            self.output_dir.mkdir(parents=True, exist_ok=True)
+            json_path.parent.mkdir(parents=True, exist_ok=True)
             if json_path.is_file():
                 json_path.unlink()
         except OSError as exc:
             raise VideoResultError(f"Could not prepare JSON path '{json_path}': {exc}") from exc
         return json_path
 
-    def path_for(self, source_path: str | Path) -> Path:
+    def path_for(self, source_path: str | Path, *, json_path: str | Path | None = None) -> Path:
+        if json_path is not None:
+            path = Path(json_path)
+            return (path if path.is_absolute() else self.project_root / path).resolve()
         source = Path(source_path)
         return self.output_dir / f"{source.stem}.json"
 
@@ -78,13 +81,15 @@ class VideoResultWriter:
         self,
         source_path: str | Path,
         result: Mapping[str, Any],
+        *,
+        json_path: str | Path | None = None,
     ) -> str:
         """Persist an already-built result without reloading it for transport."""
 
         self.validate_result(result, self.project_root)
-        json_path = self.path_for(source_path)
+        json_path = self.path_for(source_path, json_path=json_path)
         try:
-            self.output_dir.mkdir(parents=True, exist_ok=True)
+            json_path.parent.mkdir(parents=True, exist_ok=True)
             with json_path.open("w", encoding="utf-8") as handle:
                 json.dump(result, handle, indent=2, ensure_ascii=False)
                 handle.write("\n")
@@ -100,6 +105,7 @@ class VideoResultWriter:
         fps: float,
         frames: int,
         plates: Sequence[Mapping[str, Any]],
+        request_id: str | None = None,
     ) -> dict[str, Any]:
         """Build JSON-safe official data without NumPy, Path, or Track objects."""
 
@@ -132,6 +138,8 @@ class VideoResultWriter:
             "count": len(official_plates),
             "plates": official_plates,
         }
+        if request_id is not None:
+            result["request_id"] = request_id
         self.validate_result(result, self.project_root)
         return result
 
@@ -224,6 +232,8 @@ class VideoResultWriter:
             raise VideoResultError("Official JSON is missing required top-level fields")
         if result["status"] != "ok" or result["type"] != "video":
             raise VideoResultError("Official JSON has invalid status or type")
+        if "request_id" in result and (not isinstance(result["request_id"], str) or not result["request_id"]):
+            raise VideoResultError("Official JSON request_id must be a non-empty string")
         size = result["size"]
         if not isinstance(size, Mapping) or size.get("w", 0) <= 0 or size.get("h", 0) <= 0:
             raise VideoResultError("Official JSON has invalid size")

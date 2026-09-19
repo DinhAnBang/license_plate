@@ -84,16 +84,17 @@ def main() -> int:
     crops_dir = args.crops if args.crops.is_absolute() else PROJECT_ROOT / args.crops
     debug_dir = args.debug_dir if args.debug_dir.is_absolute() else PROJECT_ROOT / args.debug_dir
 
-    if not crops_dir.is_dir():
+    default_crops_dir = (PROJECT_ROOT / "output" / "crops").resolve()
+    if not crops_dir.is_dir() and crops_dir.resolve() != default_crops_dir:
         print(f"Crops directory not found: {crops_dir}")
         return 1
 
     _remove_previous_debug_images(debug_dir)
     crop_paths = sorted(
         path for path in crops_dir.iterdir() if path.is_file() and path.suffix.lower() in SUPPORTED_EXTENSIONS
-    )
+    ) if crops_dir.is_dir() else []
     fallback_crop: np.ndarray | None = None
-    if not crop_paths and crops_dir.resolve() == (PROJECT_ROOT / "output" / "crops").resolve():
+    if not crop_paths and crops_dir.resolve() == default_crops_dir:
         source_image = cv2.imread(str(PROJECT_ROOT / "input" / "images1.jpg"))
         if source_image is not None and source_image.shape[0] >= 403 and source_image.shape[1] >= 89:
             # Known plate location in the checked-in sample image.

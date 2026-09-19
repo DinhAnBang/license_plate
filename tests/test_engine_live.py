@@ -18,18 +18,19 @@ ROOT = Path(__file__).resolve().parents[1]
 def _check_outputs(response: dict, media_type: str) -> None:
     result = response["result"]
     assert result["status"] == "ok" and result["type"] == media_type
+    assert result["request_id"] == response["id"]
     assert result["count"] == len(result["plates"])
-    source_stem = Path(result["source"]).stem
-    saved_json = ROOT / "output" / "json" / f"{source_stem}.json"
+    request_dir = ROOT / "output" / "requests" / response["id"]
+    saved_json = request_dir / "result.json"
     assert json.loads(saved_json.read_text(encoding="utf-8")) == result
 
     for plate in result["plates"]:
         assert (ROOT / plate["crop"]).is_file()
         assert {"raw_text", "text", "ocr_conf"}.issubset(plate)
     if media_type == "image":
-        assert (ROOT / "output" / "images" / f"{source_stem}_result.jpg").is_file()
+        assert (request_dir / "annotated.jpg").is_file()
     else:
-        assert (ROOT / "output" / "videos" / f"{source_stem}_tracked.mp4").is_file()
+        assert (request_dir / "annotated.mp4").is_file()
         assert all("candidates" not in item and "vote_weight" not in item for item in result["plates"])
 
 

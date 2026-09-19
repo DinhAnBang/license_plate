@@ -18,6 +18,7 @@ from core.tracker import PlateTracker
 from core.video_processor import VideoProcessor
 
 from .protocol import ProtocolError, error_response, validate_request
+from .output_manager import RequestOutputManager
 
 
 LOGGER = logging.getLogger(__name__)
@@ -48,6 +49,7 @@ class AIPlateEngine:
         self.detector = detector
         self.ocr = ocr
         self.write_json = write_json
+        self.output_manager = RequestOutputManager(self.project_root)
         self.image_processor: ImageProcessor | None = None
         self.video_processor: VideoProcessor | None = None
         self.state = self.STOPPED
@@ -156,20 +158,28 @@ class AIPlateEngine:
             return error_response(request_id, "INPUT_NOT_FOUND", f"Input file not found: {source}")
 
         self.state = self.PROCESSING
+        output_paths = None
         try:
+            output_paths = self.output_manager.paths_for(request_id, request["type"])
+            self.output_manager.prepare(output_paths)
             assert self.detector is not None
             if request["type"] == "image":
                 self.detector.conf_threshold = 0.5
                 assert self.image_processor is not None
-                result = self.image_processor.process(source)
+                result = self.image_processor.process(source, output_paths=output_paths)
             else:
                 self.detector.conf_threshold = 0.7
                 assert self.video_processor is not None
-                video_result = self.video_processor.process(source)
+                video_result = self.video_processor.process(source, output_paths=output_paths)
                 result = video_result["official_result"]
             return {"id": request_id, "status": "ok", "result": result}
         except Exception as exc:
             LOGGER.exception("Request %r failed", request_id)
+            if output_paths is not None:
+                try:
+                    self.output_manager.cleanup(output_paths)
+                except Exception:
+                    LOGGER.exception("Could not clean partial output for request %r", request_id)
             return error_response(request_id, "PROCESSING_ERROR", str(exc))
         finally:
             self.state = self.READY

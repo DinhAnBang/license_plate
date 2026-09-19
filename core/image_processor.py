@@ -8,7 +8,7 @@ import math
 import time
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import cv2
 import numpy as np
@@ -16,6 +16,9 @@ import numpy as np
 from .detector import Detection, DetectorError, PlateDetector
 from .ocr import MicroCharNetOCR
 from .plate_normalizer import PlateNormalizer
+
+if TYPE_CHECKING:
+    from engine.output_manager import RequestOutputPaths
 
 
 LOGGER = logging.getLogger(__name__)
@@ -53,7 +56,9 @@ class ImageProcessor:
         self.crops_dir = self.output_dir / "crops"
         self.json_dir = self.output_dir / "json"
 
-    def process(self, source_path: str | Path) -> dict[str, Any]:
+    def process(
+        self, source_path: str | Path, *, output_paths: RequestOutputPaths | None = None
+    ) -> dict[str, Any]:
         """Process an image and return the same data that is written to JSON."""
 
         source = Path(source_path)
@@ -70,9 +75,18 @@ class ImageProcessor:
         height, width = image.shape[:2]
         self.ocr_calls = 0
         self.ocr_total_ms = 0.0
-        stem = source.stem
-        self._create_output_dirs()
-        self._remove_old_crops(stem)
+        if output_paths is None:
+            # Development-only direct processor calls retain the Phase 8 paths.
+            stem = source.stem
+            self._create_output_dirs()
+            self._remove_old_crops(stem)
+            crops_dir = self.crops_dir
+            annotated_path = self.images_dir / f"{stem}_result.jpg"
+            json_path = self.json_dir / f"{stem}.json"
+        else:
+            crops_dir = output_paths.crops_dir
+            annotated_path = output_paths.annotated
+            json_path = output_paths.result_json
 
         try:
             detections = self.detector.detect(image)
@@ -111,7 +125,10 @@ class ImageProcessor:
             normalized_text = PlateNormalizer.normalize(raw_text)
             if not normalized_text:
                 ocr_conf = 0.0
-            crop_path = self.crops_dir / f"{stem}_{plate_id:03d}.jpg"
+            crop_path = (
+                crops_dir / f"{stem}_{plate_id:03d}.jpg"
+                if output_paths is None else crops_dir / f"plate_{plate_id:03d}.jpg"
+            )
             if not cv2.imwrite(str(crop_path), crop):
                 raise ImageProcessingError(f"Could not save crop: {crop_path}")
 
@@ -130,7 +147,6 @@ class ImageProcessor:
             )
             self._draw_detection(annotated, plate_id, confidence, box)
 
-        annotated_path = self.images_dir / f"{stem}_result.jpg"
         if not cv2.imwrite(str(annotated_path), annotated):
             raise ImageProcessingError(f"Could not save annotated image: {annotated_path}")
 
@@ -142,7 +158,8 @@ class ImageProcessor:
             "count": len(plates),
             "plates": plates,
         }
-        json_path = self.json_dir / f"{stem}.json"
+        if output_paths is not None:
+            result["request_id"] = output_paths.request_id
         if self.write_json:
             self._write_json(json_path, result)
         elif json_path.is_file():

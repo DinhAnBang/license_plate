@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from typing import Any
 
 
@@ -15,13 +16,30 @@ class ProtocolError(ValueError):
         return self.message
 
 
+REQUEST_ID_PATTERN = re.compile(r"[A-Za-z0-9_-]{1,80}\Z")
+WINDOWS_RESERVED_NAMES = {"CON", "PRN", "AUX", "NUL"} | {
+    f"{prefix}{number}" for prefix in ("COM", "LPT") for number in range(1, 10)
+}
+
+
+def validate_request_id(value: Any) -> str:
+    if (
+        not isinstance(value, str)
+        or REQUEST_ID_PATTERN.fullmatch(value) is None
+        or value.upper() in WINDOWS_RESERVED_NAMES
+    ):
+        raise ProtocolError(
+            "INVALID_REQUEST_ID",
+            "Request id must contain 1-80 ASCII letters, digits, hyphens, or underscores and not be a Windows reserved name.",
+        )
+    return value
+
+
 def validate_request(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ProtocolError("INVALID_REQUEST", "Request must be a JSON object.")
 
-    request_id = value.get("id")
-    if not isinstance(request_id, (str, int)) or isinstance(request_id, bool):
-        raise ProtocolError("INVALID_REQUEST", "Request id must be a string or integer.")
+    validate_request_id(value.get("id"))
 
     action = value.get("action")
     if not isinstance(action, str) or not action:
