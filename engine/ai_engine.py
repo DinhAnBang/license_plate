@@ -157,7 +157,11 @@ class AIPlateEngine:
         shape = self.detector.input_shape
         if len(shape) != 4 or self.detector.input_type != "tensor(float)":
             raise RuntimeError(f"Unsupported detector warm-up input: {shape}")
-        probe_shape = [dim if isinstance(dim, int) and dim > 0 else 1 for dim in shape]
+        probe_shape = getattr(
+            self.detector,
+            "inference_input_shape",
+            [dim if isinstance(dim, int) and dim > 0 else 1 for dim in shape],
+        )
         probe = np.zeros(probe_shape, dtype=np.float32)
         names = [item["name"] for item in self.detector.output_info]
         self.detector.session.run(names, {self.detector.input_name: probe})

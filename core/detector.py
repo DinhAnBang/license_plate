@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -102,6 +103,10 @@ class PlateDetector:
         self._input_type = self._input.type
         self._input_name = self._input.name
         self._output_names = [output.name for output in outputs]
+        try:
+            self._metadata = dict(self.session.get_modelmeta().custom_metadata_map or {})
+        except Exception:
+            self._metadata = {}
 
         self._input_height, self._input_width, self._channel_first = (
             self._validate_input_metadata()
@@ -124,6 +129,14 @@ class PlateDetector:
     @property
     def input_type(self) -> str:
         return self._input_type
+
+    @property
+    def inference_input_shape(self) -> list[int]:
+        """Return the concrete tensor shape used for inference and warm-up."""
+
+        if self._channel_first:
+            return [1, 3, self._input_height, self._input_width]
+        return [1, self._input_height, self._input_width, 3]
 
     @property
     def output_info(self) -> list[dict[str, Any]]:
@@ -243,10 +256,24 @@ class PlateDetector:
             )
 
         if not isinstance(height_dimension, int) or not isinstance(width_dimension, int):
-            raise DetectorError(
-                "Dynamic spatial input shape is not supported without a configured "
-                f"input size: {self._input_shape!r}"
-            )
+            metadata_size = self._metadata_input_size()
+            if metadata_size is None:
+                raise DetectorError(
+                    "Dynamic spatial input shape is not supported without a valid "
+                    f"'imgsz' model metadata value: {self._input_shape!r}"
+                )
+            metadata_height, metadata_width = metadata_size
+            if isinstance(height_dimension, int) and height_dimension != metadata_height:
+                raise DetectorError(
+                    "Model input height conflicts with 'imgsz' metadata: "
+                    f"shape={self._input_shape!r}, imgsz={metadata_size!r}"
+                )
+            if isinstance(width_dimension, int) and width_dimension != metadata_width:
+                raise DetectorError(
+                    "Model input width conflicts with 'imgsz' metadata: "
+                    f"shape={self._input_shape!r}, imgsz={metadata_size!r}"
+                )
+            height_dimension, width_dimension = metadata_size
         if height_dimension <= 0 or width_dimension <= 0:
             raise DetectorError(f"Invalid model input shape: {self._input_shape!r}")
 
@@ -257,6 +284,29 @@ class PlateDetector:
             )
 
         return height_dimension, width_dimension, channel_first
+
+    def _metadata_input_size(self) -> tuple[int, int] | None:
+        """Return a verified ``(height, width)`` for dynamic Ultralytics exports."""
+
+        raw_imgsz = self._metadata.get("imgsz")
+        if not raw_imgsz:
+            return None
+        try:
+            imgsz = ast.literal_eval(raw_imgsz)
+        except (SyntaxError, ValueError, TypeError):
+            return None
+
+        if isinstance(imgsz, int):
+            height = width = imgsz
+        elif isinstance(imgsz, (list, tuple)) and len(imgsz) == 2:
+            height, width = imgsz
+        else:
+            return None
+        if not isinstance(height, int) or not isinstance(width, int):
+            return None
+        if height <= 0 or width <= 0:
+            return None
+        return height, width
 
     @staticmethod
     def _validate_image(image: np.ndarray) -> None:
