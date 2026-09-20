@@ -57,6 +57,12 @@ class AIPlateEngine:
         write_json: bool = True,
         resource_root: str | Path | None = None,
         tracker_mode: str = "sort",
+        t5_enabled: bool = True,
+        vietnam_plate_validation_enabled: bool | None = None,
+        vietnam_plate_correction_enabled: bool | None = None,
+        final_invalid_filter_enabled: bool | None = None,
+        final_duplicate_merge_enabled: bool | None = None,
+        overlap_duplicate_merge_enabled: bool | None = None,
     ) -> None:
         if tracker_mode not in {"legacy", "sort", "byte"}:
             raise ValueError("tracker_mode must be 'legacy', 'sort', or 'byte'")
@@ -71,6 +77,14 @@ class AIPlateEngine:
         self.ocr = ocr
         self.write_json = write_json
         self.tracker_mode = tracker_mode
+        self.t5_enabled = bool(t5_enabled)
+        self.t5_flags = {
+            "vietnam_plate_validation_enabled": vietnam_plate_validation_enabled,
+            "vietnam_plate_correction_enabled": vietnam_plate_correction_enabled,
+            "final_invalid_filter_enabled": final_invalid_filter_enabled,
+            "final_duplicate_merge_enabled": final_duplicate_merge_enabled,
+            "overlap_duplicate_merge_enabled": overlap_duplicate_merge_enabled,
+        }
         self.output_manager = RequestOutputManager(self.app_root)
         self.image_processor: ImageProcessor | None = None
         self.video_processor: VideoProcessor | None = None
@@ -145,6 +159,8 @@ class AIPlateEngine:
                 top_k=RECOGNITION_TOP_K,
                 write_json=self.write_json,
                 tracker_mode=self.tracker_mode,
+                t5_enabled=self.t5_enabled,
+                **self.t5_flags,
             )
             self.startup_ms = (time.perf_counter() - started) * 1000.0
             self.state = self.READY

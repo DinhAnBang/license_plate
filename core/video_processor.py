@@ -23,11 +23,23 @@ from .config import (
     BYTE_REFERENCE_FPS,
     BYTE_TRACK_BUFFER_FRAMES_AT_30FPS,
     BYTE_UNCONFIRMED_MATCH_IOU_THRESHOLD,
+    DUPLICATE_CENTER_DISTANCE_THRESHOLD,
+    DUPLICATE_MAX_CENTER_DISTANCE_RATIO,
+    DUPLICATE_MAX_GAP_SEC,
+    DUPLICATE_MEAN_IOU_THRESHOLD,
+    DUPLICATE_MIN_SHARED_FRAMES,
+    FINAL_DUPLICATE_MERGE_ENABLED,
+    FINAL_INVALID_FILTER_ENABLED,
     RECOGNITION_TOP_K,
     SORT_IOU_THRESHOLD,
     SORT_MAX_AGE,
     SORT_MIN_HITS,
+    T5_MAX_CORRECTIONS,
+    VIETNAM_PLATE_CORRECTION_ENABLED,
+    VIETNAM_PLATE_VALIDATION_ENABLED,
+    OVERLAP_DUPLICATE_MERGE_ENABLED,
 )
+from .final_plate_deduplication import FinalPlateDedupConfig, FinalPlateDeduplicator
 from .ocr import MicroCharNetOCR
 from .ocr_voter import OCRVoter
 from .plate_normalizer import PlateNormalizer
@@ -41,6 +53,7 @@ from .tracklet_stitcher import (
     TrackletStitcher,
 )
 from .tracker import PlateTracker
+from .vietnam_plate_validator import VietnamPlateValidator
 
 if TYPE_CHECKING:
     from engine.output_manager import RequestOutputPaths
@@ -78,6 +91,7 @@ class _TrackObservation:
     last_frame: int
     first_box: list[int]
     last_box: list[int]
+    boxes_by_frame: dict[int, tuple[int, int, int, int]]
 
 
 class VideoProcessor:
@@ -108,6 +122,17 @@ class VideoProcessor:
         byte_trace_enabled: bool = False,
         stitching_enabled: bool | None = None,
         stitch_config: TrackletStitchConfig | None = None,
+        t5_enabled: bool | None = None,
+        vietnam_plate_validation_enabled: bool | None = None,
+        vietnam_plate_correction_enabled: bool | None = None,
+        final_invalid_filter_enabled: bool | None = None,
+        final_duplicate_merge_enabled: bool | None = None,
+        overlap_duplicate_merge_enabled: bool | None = None,
+        duplicate_min_shared_frames: int = DUPLICATE_MIN_SHARED_FRAMES,
+        duplicate_mean_iou_threshold: float = DUPLICATE_MEAN_IOU_THRESHOLD,
+        duplicate_center_distance_threshold: float = DUPLICATE_CENTER_DISTANCE_THRESHOLD,
+        duplicate_max_gap_sec: float = DUPLICATE_MAX_GAP_SEC,
+        duplicate_max_center_distance_ratio: float = DUPLICATE_MAX_CENTER_DISTANCE_RATIO,
     ) -> None:
         self.detector = detector
         if tracker_mode is None:
@@ -172,6 +197,54 @@ class VideoProcessor:
         else:
             self.stitch_config = stitch_config
         self.stitching_enabled = self.stitch_config.enabled
+        explicit_t5_flags = (
+            vietnam_plate_validation_enabled,
+            vietnam_plate_correction_enabled,
+            final_invalid_filter_enabled,
+            final_duplicate_merge_enabled,
+            overlap_duplicate_merge_enabled,
+        )
+        # Direct historical VideoProcessor harnesses default to the pre-T5
+        # result behavior.  The persistent engine passes t5_enabled=True
+        # explicitly, while benchmark callers can opt in/out per switch.
+        if t5_enabled is None:
+            t5_active = any(value is not None for value in explicit_t5_flags)
+        else:
+            t5_active = bool(t5_enabled)
+        self.t5_enabled = t5_active
+        self.vietnam_plate_validation_enabled = (
+            bool(vietnam_plate_validation_enabled) if t5_active and vietnam_plate_validation_enabled is not None
+            else (VIETNAM_PLATE_VALIDATION_ENABLED if t5_active else False)
+        )
+        self.vietnam_plate_correction_enabled = (
+            bool(vietnam_plate_correction_enabled) if t5_active and vietnam_plate_correction_enabled is not None
+            else (VIETNAM_PLATE_CORRECTION_ENABLED if t5_active else False)
+        )
+        self.final_invalid_filter_enabled = (
+            bool(final_invalid_filter_enabled) if t5_active and final_invalid_filter_enabled is not None
+            else (FINAL_INVALID_FILTER_ENABLED if t5_active else False)
+        )
+        self.final_duplicate_merge_enabled = (
+            bool(final_duplicate_merge_enabled) if t5_active and final_duplicate_merge_enabled is not None
+            else (FINAL_DUPLICATE_MERGE_ENABLED if t5_active else False)
+        )
+        self.overlap_duplicate_merge_enabled = (
+            bool(overlap_duplicate_merge_enabled) if t5_active and overlap_duplicate_merge_enabled is not None
+            else (OVERLAP_DUPLICATE_MERGE_ENABLED if t5_active else False)
+        )
+        self.plate_validator = VietnamPlateValidator(
+            correction_enabled=self.vietnam_plate_correction_enabled,
+            max_corrections=T5_MAX_CORRECTIONS,
+        )
+        self.final_dedup_config = FinalPlateDedupConfig(
+            enabled=self.final_duplicate_merge_enabled,
+            overlap_enabled=self.overlap_duplicate_merge_enabled,
+            min_shared_frames=duplicate_min_shared_frames,
+            mean_iou_threshold=duplicate_mean_iou_threshold,
+            center_distance_threshold=duplicate_center_distance_threshold,
+            max_gap_sec=duplicate_max_gap_sec,
+            max_center_distance_ratio=duplicate_max_center_distance_ratio,
+        )
         if not isinstance(top_k, int) or top_k < 1:
             raise ValueError("top_k must be a positive integer")
         self.top_k = top_k
@@ -711,10 +784,12 @@ class VideoProcessor:
                     last_frame=frame_index,
                     first_box=box.copy(),
                     last_box=box.copy(),
+                    boxes_by_frame={frame_index: tuple(box)},
                 )
             else:
                 current.last_frame = frame_index
                 current.last_box = box.copy()
+                current.boxes_by_frame[frame_index] = tuple(box)
 
     def _save_best_crops(
         self,
@@ -728,6 +803,7 @@ class VideoProcessor:
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         crops_dir = output_paths.crops_dir if output_paths is not None else self.output_dir / "crops"
         tracklets: list[Tracklet] = []
+        validator_seconds = 0.0
         for track in track_summaries:
             track_id = int(track["track_id"])
             retained = best_candidates.get(track_id, [])
@@ -750,7 +826,19 @@ class VideoProcessor:
                         LOGGER.warning("OCR failed for track %d frame %d: %s", track_id, candidate.best_frame, exc)
                     finally:
                         self.ocr_total_ms += (time.perf_counter() - ocr_start) * 1000.0
-                normalized_text = PlateNormalizer.normalize(raw_text)
+                validation_started = time.perf_counter()
+                validation = (
+                    self.plate_validator.validate(raw_text)
+                    if self.vietnam_plate_validation_enabled
+                    else None
+                )
+                if validation is not None:
+                    validator_seconds += time.perf_counter() - validation_started
+                normalized_text = (
+                    validation.normalized_text
+                    if validation is not None
+                    else PlateNormalizer.normalize(raw_text)
+                )
                 if not normalized_text:
                     ocr_conf = 0.0
                 vote_input = {
@@ -758,6 +846,8 @@ class VideoProcessor:
                     "text": normalized_text,
                     "ocr_conf": ocr_conf,
                     "quality": candidate.quality,
+                    "validation_status": validation.status if validation is not None else "",
+                    "validation_score": validation.confidence_or_score if validation is not None else 0.0,
                 }
                 voted_candidates.append(vote_input)
                 recognized_candidates.append(
@@ -780,6 +870,10 @@ class VideoProcessor:
                         raw_text=raw_text,
                         plate_text=normalized_text,
                         ocr_confidence=ocr_conf,
+                        validation_status=validation.status if validation is not None else "",
+                        validation_score=validation.confidence_or_score if validation is not None else 0.0,
+                        corrections=validation.corrections if validation is not None else (),
+                        validation_reasons=validation.reasons if validation is not None else (),
                     )
                 )
 
@@ -817,6 +911,11 @@ class VideoProcessor:
             else:
                 first_box = tuple(observation.first_box)
                 last_box = tuple(observation.last_box)
+            observation_history = (
+                tuple(sorted(observation.boxes_by_frame.items()))
+                if observation is not None
+                else ()
+            )
             tracklets.append(
                 Tracklet(
                     track_id=track_id,
@@ -829,13 +928,44 @@ class VideoProcessor:
                     ocr_confidence=float(vote["ocr_conf"]),
                     candidates=tuple(recognized_candidates),
                     selected_candidate=candidate,
+                    observation_history=observation_history,
                 )
             )
 
         stitch_result = TrackletStitcher(self.stitch_config).stitch(tracklets, fps)
+        dedup_result = FinalPlateDeduplicator(self.final_dedup_config).deduplicate(
+            stitch_result.events, fps
+        )
+        final_events = list(dedup_result.events)
+        invalid_results: list[dict[str, Any]] = []
+        if self.final_invalid_filter_enabled:
+            kept_events: list[Any] = []
+            for event in final_events:
+                if event.canonical_validation_status == "INVALID":
+                    invalid_results.append(
+                        {
+                            "event_id": event.event_id,
+                            "member_track_ids": event.member_track_ids,
+                            "raw_ocr": event.best_candidate.raw_text,
+                            "normalized": event.canonical_plate_text,
+                            "reason": list(
+                                dict.fromkeys(
+                                    reason
+                                    for tracklet in event.tracklets
+                                    for candidate in tracklet.candidates
+                                    if candidate.plate_text == event.canonical_plate_text
+                                    for reason in candidate.validation_reasons
+                                )
+                            )
+                            or ["does not match a supported Vietnam plate structure"],
+                        }
+                    )
+                    continue
+                kept_events.append(event)
+            final_events = kept_events
         saved: list[dict[str, Any]] = []
         event_diagnostics: list[dict[str, Any]] = []
-        for event in stitch_result.events:
+        for event in final_events:
             candidate = event.best_candidate
             crop_path = (
                 crops_dir / f"track_{candidate.track_id:04d}.jpg"
@@ -895,6 +1025,26 @@ class VideoProcessor:
         metrics["raw_track_count"] = len(track_summaries)
         metrics["tracklets_with_candidates"] = len(tracklets)
         metrics["final_crop_count"] = len(saved)
+        metrics["t5_plate_event_count_before_filter"] = len(dedup_result.events)
+        metrics["t5_valid_count"] = sum(
+            event.canonical_validation_status == "VALID" for event in dedup_result.events
+        )
+        metrics["t5_uncertain_count"] = sum(
+            event.canonical_validation_status == "UNCERTAIN" for event in dedup_result.events
+        )
+        metrics["t5_invalid_count"] = len(invalid_results)
+        metrics["t5_final_event_count"] = len(final_events)
+        metrics["sequential_duplicate_merges"] = dedup_result.metrics[
+            "sequential_duplicate_merges"
+        ]
+        metrics["overlapping_duplicate_merges"] = dedup_result.metrics[
+            "overlapping_duplicate_merges"
+        ]
+        metrics["t5_duplicate_merges"] = dedup_result.metrics["number_of_merges"]
+        metrics["duplicate_ms"] = dedup_result.metrics["duplicate_ms"]
+        validator_ms = validator_seconds * 1000.0
+        metrics["validator_ms"] = validator_ms
+        metrics["total_t5_ms"] = validator_ms + float(dedup_result.metrics["duplicate_ms"])
         diagnostics = {
             "enabled": self.stitching_enabled,
             "config": {
@@ -905,7 +1055,22 @@ class VideoProcessor:
             },
             "metrics": metrics,
             "events": event_diagnostics,
-            "decisions": [dict(item) for item in stitch_result.decisions],
+            "decisions": [
+                *[dict(item) for item in stitch_result.decisions],
+                *[dict(item) for item in dedup_result.decisions],
+            ],
+            "t5": {
+                "enabled": self.t5_enabled,
+                "validation_enabled": self.vietnam_plate_validation_enabled,
+                "correction_enabled": self.vietnam_plate_correction_enabled,
+                "invalid_filter_enabled": self.final_invalid_filter_enabled,
+                "duplicate_merge_enabled": self.final_duplicate_merge_enabled,
+                "overlap_duplicate_merge_enabled": self.overlap_duplicate_merge_enabled,
+                "invalid_results": invalid_results,
+                "duplicate_metrics": dict(dedup_result.metrics),
+                "duplicate_decisions": [dict(item) for item in dedup_result.decisions],
+                "validator_ms": validator_ms,
+            },
         }
         return saved, diagnostics
 

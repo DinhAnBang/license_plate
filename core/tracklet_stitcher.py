@@ -71,6 +71,10 @@ class TrackletCandidate:
     raw_text: str = ""
     plate_text: str = ""
     ocr_confidence: float = 0.0
+    validation_status: str = ""
+    validation_score: float = 0.0
+    corrections: tuple[str, ...] = ()
+    validation_reasons: tuple[str, ...] = ()
 
     def vote_input(self) -> dict[str, Any]:
         return {
@@ -78,6 +82,8 @@ class TrackletCandidate:
             "text": self.plate_text,
             "ocr_conf": self.ocr_confidence,
             "quality": self.quality,
+            "validation_status": self.validation_status,
+            "validation_score": self.validation_score,
         }
 
 
@@ -95,6 +101,7 @@ class Tracklet:
     ocr_confidence: float
     candidates: tuple[TrackletCandidate, ...]
     selected_candidate: TrackletCandidate
+    observation_history: tuple[tuple[int, tuple[int, int, int, int]], ...] = ()
 
 
 @dataclass
@@ -107,6 +114,8 @@ class PlateEvent:
     canonical_ocr_confidence: float
     best_candidate: TrackletCandidate
     merge_history: list[dict[str, Any]] = field(default_factory=list)
+    canonical_validation_status: str = ""
+    canonical_validation_score: float = 0.0
 
     @property
     def member_track_ids(self) -> list[int]:
@@ -280,13 +289,15 @@ class TrackletStitcher:
 
     @staticmethod
     def _new_event(event_id: int, tracklet: Tracklet) -> PlateEvent:
-        return PlateEvent(
+        event = PlateEvent(
             event_id=event_id,
             tracklets=[tracklet],
             canonical_plate_text=tracklet.plate_text,
             canonical_ocr_confidence=tracklet.ocr_confidence,
             best_candidate=tracklet.selected_candidate,
         )
+        refresh_plate_event(event)
+        return event
 
     def _evaluate(
         self, event: PlateEvent, tracklet: Tracklet, fps: float
@@ -358,21 +369,46 @@ class TrackletStitcher:
 
     @staticmethod
     def _refresh_event(event: PlateEvent) -> None:
-        candidates = [
-            candidate
-            for tracklet in event.tracklets
-            for candidate in tracklet.candidates
-        ]
-        vote = OCRVoter.vote([candidate.vote_input() for candidate in candidates])
-        event.canonical_plate_text = str(vote["text"])
-        event.canonical_ocr_confidence = float(vote["ocr_conf"])
-        supporting = [
-            candidate
-            for candidate in candidates
-            if candidate.plate_text == event.canonical_plate_text
-        ]
-        pool = supporting or candidates
+        refresh_plate_event(event)
+
+
+def refresh_plate_event(event: PlateEvent) -> None:
+    """Refresh internal event consensus after T4 or T5 membership changes."""
+
+    candidates = [
+        candidate
+        for tracklet in event.tracklets
+        for candidate in tracklet.candidates
+    ]
+    vote = OCRVoter.vote([candidate.vote_input() for candidate in candidates])
+    event.canonical_plate_text = str(vote["text"])
+    event.canonical_ocr_confidence = float(vote["ocr_conf"])
+    supporting = [
+        candidate
+        for candidate in candidates
+        if candidate.plate_text == event.canonical_plate_text
+    ]
+    pool = supporting or candidates
+    if pool:
         event.best_candidate = max(pool, key=_candidate_quality_key)
+
+    matching_statuses = [
+        candidate.validation_status
+        for candidate in supporting
+        if candidate.validation_status
+    ]
+    all_statuses = [candidate.validation_status for candidate in candidates if candidate.validation_status]
+    if "VALID" in matching_statuses:
+        event.canonical_validation_status = "VALID"
+    elif "UNCERTAIN" in matching_statuses:
+        event.canonical_validation_status = "UNCERTAIN"
+    elif "INVALID" in matching_statuses:
+        event.canonical_validation_status = "INVALID"
+    elif all_statuses and all(status == "INVALID" for status in all_statuses):
+        event.canonical_validation_status = "INVALID"
+    else:
+        event.canonical_validation_status = str(vote.get("validation_status", ""))
+    event.canonical_validation_score = float(vote.get("validation_score", 0.0))
 
 
 def _candidate_quality_key(candidate: TrackletCandidate) -> tuple[float, float, float, int]:

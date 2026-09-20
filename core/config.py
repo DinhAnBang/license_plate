@@ -52,6 +52,21 @@ STITCH_MAX_EDIT_DISTANCE = 1
 STITCH_MIN_FUZZY_TEXT_LENGTH = 6
 STITCH_MAX_CENTER_DISTANCE_RATIO = 3.0
 
+# T5 Vietnam plate validation and final duplicate removal.  These switches
+# are explicit so historical T1-T4 benchmark entry points can disable the
+# rule layer without changing detector/tracker/OCR behavior.
+VIETNAM_PLATE_VALIDATION_ENABLED = True
+VIETNAM_PLATE_CORRECTION_ENABLED = True
+FINAL_INVALID_FILTER_ENABLED = True
+FINAL_DUPLICATE_MERGE_ENABLED = True
+OVERLAP_DUPLICATE_MERGE_ENABLED = True
+T5_MAX_CORRECTIONS = 2
+DUPLICATE_MIN_SHARED_FRAMES = 3
+DUPLICATE_MEAN_IOU_THRESHOLD = 0.65
+DUPLICATE_CENTER_DISTANCE_THRESHOLD = 0.75
+DUPLICATE_MAX_GAP_SEC = STITCH_MAX_GAP_SEC
+DUPLICATE_MAX_CENTER_DISTANCE_RATIO = STITCH_MAX_CENTER_DISTANCE_RATIO
+
 # Historical benchmark reference values. These are separate from the legacy
 # tracker defaults because the benchmark intentionally compares legacy and
 # SORT with the same 0.25 association threshold.
