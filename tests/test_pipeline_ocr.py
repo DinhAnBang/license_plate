@@ -108,7 +108,7 @@ def test_processors() -> None:
         }
         assert image_ocr.calls == 1
         image_json = json.loads((root / "output/json/test.json").read_text(encoding="utf-8"))
-        assert image_json == image_result
+        assert image_json == image_result["production_result"]
 
         empty_image = ImageProcessor(FakeDetector(False), project_root=root, ocr=image_ocr)
         assert empty_image.process(image_path)["plates"] == []
@@ -134,9 +134,11 @@ def test_processors() -> None:
         video_result = processor.process(video_path)
         saved = json.loads((root / video_result["json"]).read_text(encoding="utf-8"))
         assert saved["count"] == len(saved["plates"]) == 1
-        assert saved["plates"][0]["raw_text"] == saved["plates"][0]["text"] == ""
-        assert saved["plates"][0]["ocr_conf"] == 0.0
-        assert saved["plates"][0]["best_frame"] == 1
+        assert saved["plates"][0]["plate_text"] == ""
+        assert saved["plates"][0]["ocr_confidence"] == 0.0
+        assert saved["plates"][0]["best_frame_index"] == 1
+        assert saved["plates"][0]["first_detected_frame"] == 1
+        assert saved["plates"][0]["last_detected_frame"] == 4
         assert video_ocr.calls == video_result["ocr_calls"] == 3
         assert video_result["ocr_report"][0]["candidates_retained"] == 3
         assert video_detector.calls == 4

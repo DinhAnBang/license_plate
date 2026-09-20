@@ -14,11 +14,32 @@ import cv2
 import numpy as np
 
 from .detector import DetectorError, PlateDetector
+from .byte_tracker import ByteTracker
+from .config import (
+    BYTE_HIGH_MATCH_IOU_THRESHOLD,
+    BYTE_HIGH_THRESHOLD,
+    BYTE_LOW_MATCH_IOU_THRESHOLD,
+    BYTE_LOW_THRESHOLD,
+    BYTE_REFERENCE_FPS,
+    BYTE_TRACK_BUFFER_FRAMES_AT_30FPS,
+    BYTE_UNCONFIRMED_MATCH_IOU_THRESHOLD,
+    RECOGNITION_TOP_K,
+    SORT_IOU_THRESHOLD,
+    SORT_MAX_AGE,
+    SORT_MIN_HITS,
+)
 from .ocr import MicroCharNetOCR
 from .ocr_voter import OCRVoter
 from .plate_normalizer import PlateNormalizer
 from .quality import PlateQualityEvaluator
 from .result_writer import VideoResultError, VideoResultWriter
+from .sort_tracker import SortTracker
+from .tracklet_stitcher import (
+    Tracklet,
+    TrackletCandidate,
+    TrackletStitchConfig,
+    TrackletStitcher,
+)
 from .tracker import PlateTracker
 
 if TYPE_CHECKING:
@@ -51,6 +72,14 @@ class _BestCandidate:
     crop: np.ndarray
 
 
+@dataclass
+class _TrackObservation:
+    first_frame: int
+    last_frame: int
+    first_box: list[int]
+    last_box: list[int]
+
+
 class VideoProcessor:
     """Process every frame of a video with one already-created detector."""
 
@@ -59,22 +88,90 @@ class VideoProcessor:
         detector: PlateDetector,
         output_dir: str | Path = "output",
         project_root: str | Path | None = None,
-        tracker: PlateTracker | None = None,
+        tracker: PlateTracker | SortTracker | ByteTracker | None = None,
         quality_evaluator: PlateQualityEvaluator | None = None,
         result_writer: VideoResultWriter | None = None,
         ocr: MicroCharNetOCR | None = None,
-        top_k: int = 3,
+        top_k: int = RECOGNITION_TOP_K,
         write_json: bool = True,
+        tracker_mode: str | None = None,
+        sort_iou_threshold: float = SORT_IOU_THRESHOLD,
+        sort_max_age: int = SORT_MAX_AGE,
+        sort_min_hits: int = SORT_MIN_HITS,
+        track_high_thresh: float = BYTE_HIGH_THRESHOLD,
+        track_low_thresh: float = BYTE_LOW_THRESHOLD,
+        byte_high_match_iou_threshold: float = BYTE_HIGH_MATCH_IOU_THRESHOLD,
+        byte_low_match_iou_threshold: float = BYTE_LOW_MATCH_IOU_THRESHOLD,
+        byte_unconfirmed_match_iou_threshold: float = BYTE_UNCONFIRMED_MATCH_IOU_THRESHOLD,
+        byte_track_buffer: int = BYTE_TRACK_BUFFER_FRAMES_AT_30FPS,
+        byte_reference_fps: float = BYTE_REFERENCE_FPS,
+        byte_trace_enabled: bool = False,
+        stitching_enabled: bool | None = None,
+        stitch_config: TrackletStitchConfig | None = None,
     ) -> None:
         self.detector = detector
+        if tracker_mode is None:
+            if isinstance(tracker, ByteTracker):
+                tracker_mode = "byte"
+            elif isinstance(tracker, SortTracker):
+                tracker_mode = "sort"
+            elif isinstance(tracker, PlateTracker):
+                tracker_mode = "legacy"
+            else:
+                tracker_mode = "sort"
+        if tracker_mode not in {"legacy", "sort", "byte", "disabled"}:
+            raise ValueError("tracker_mode must be 'legacy', 'sort', 'byte', or 'disabled'")
+        if tracker_mode == "legacy":
+            if tracker is None:
+                tracker = PlateTracker(iou_threshold=sort_iou_threshold, max_missed=sort_max_age)
+            elif not isinstance(tracker, PlateTracker):
+                raise ValueError("tracker_mode='legacy' requires a PlateTracker")
+        elif tracker_mode == "sort":
+            if tracker is None:
+                tracker = SortTracker(
+                    iou_threshold=sort_iou_threshold,
+                    max_age=sort_max_age,
+                    min_hits=sort_min_hits,
+                )
+            elif not isinstance(tracker, SortTracker) or isinstance(tracker, ByteTracker):
+                raise ValueError("tracker_mode='sort' requires a SortTracker")
+        elif tracker_mode == "byte":
+            if tracker is None:
+                tracker = ByteTracker(
+                    track_high_thresh=track_high_thresh,
+                    track_low_thresh=track_low_thresh,
+                    high_match_iou_threshold=byte_high_match_iou_threshold,
+                    low_match_iou_threshold=byte_low_match_iou_threshold,
+                    unconfirmed_match_iou_threshold=byte_unconfirmed_match_iou_threshold,
+                    track_buffer_frames_at_30fps=byte_track_buffer,
+                    reference_fps=byte_reference_fps,
+                    min_hits=sort_min_hits,
+                    trace_enabled=byte_trace_enabled,
+                )
+            elif not isinstance(tracker, ByteTracker):
+                raise ValueError("tracker_mode='byte' requires a ByteTracker")
+        elif tracker is not None:
+            raise ValueError("tracker_mode='disabled' does not accept a tracker")
+        self.tracker_mode = tracker_mode
         self.tracker = tracker
-        if quality_evaluator is not None and tracker is None:
+        if quality_evaluator is not None and self.tracker is None:
             raise ValueError("quality_evaluator requires tracker to be enabled")
         if result_writer is not None and quality_evaluator is None:
             raise ValueError("result_writer requires quality_evaluator to be enabled")
         self.quality_evaluator = quality_evaluator
         self.result_writer = result_writer
         self.write_json = write_json
+        if stitch_config is None:
+            self.stitch_config = (
+                TrackletStitchConfig()
+                if stitching_enabled is None
+                else TrackletStitchConfig(enabled=bool(stitching_enabled))
+            )
+        elif stitching_enabled is not None and stitch_config.enabled != stitching_enabled:
+            raise ValueError("stitching_enabled conflicts with stitch_config.enabled")
+        else:
+            self.stitch_config = stitch_config
+        self.stitching_enabled = self.stitch_config.enabled
         if not isinstance(top_k, int) or top_k < 1:
             raise ValueError("top_k must be a positive integer")
         self.top_k = top_k
@@ -101,6 +198,7 @@ class VideoProcessor:
         source = source.resolve()
         if not source.is_file():
             raise VideoProcessingError(f"Input video does not exist: {source}")
+        processing_start = time.perf_counter()
 
         if output_paths is None:
             try:
@@ -142,6 +240,8 @@ class VideoProcessor:
                 raise VideoProcessingError(
                     f"Video FPS is invalid ({fps!r}); cannot create a reliable output."
                 )
+            if isinstance(self.tracker, ByteTracker):
+                self.tracker.configure_frame_rate(fps)
             if not math.isfinite(frame_count_value) or frame_count_value < 0.0:
                 raise VideoProcessingError(
                     f"Video frame count is invalid ({frame_count_value!r})."
@@ -164,12 +264,11 @@ class VideoProcessor:
             quality_candidates = 0
             invalid_crops = 0
             best_candidates: dict[int, list[_BestCandidate]] = {}
+            track_observations: dict[int, _TrackObservation] = {}
             self.ocr_calls = 0
             self.ocr_total_ms = 0.0
             ocr_report: list[dict[str, Any]] = []
             last_progress_bucket = 0
-            processing_start = time.perf_counter()
-
             while True:
                 ok, frame = cap.read()
                 if not ok:
@@ -187,7 +286,14 @@ class VideoProcessor:
 
                 detect_start = time.perf_counter()
                 try:
-                    detections = self.detector.detect(frame)
+                    if isinstance(self.tracker, ByteTracker):
+                        detections, detector_stats = self.detector.detect_with_stats(
+                            frame,
+                            conf_threshold=self.tracker.track_low_thresh,
+                        )
+                        self.tracker.record_detector_stats(detector_stats)
+                    else:
+                        detections = self.detector.detect(frame)
                 except DetectorError as exc:
                     raise VideoProcessingError(
                         f"Detection failed at frame {processed_frames + 1}: {exc}"
@@ -212,9 +318,17 @@ class VideoProcessor:
                         ) from exc
                     total_tracking_seconds += time.perf_counter() - tracking_start
 
+                    self._record_track_observations(
+                        track_observations,
+                        tracked_detections,
+                        frame_index=processed_frames + 1,
+                    )
+
                     if self.quality_evaluator is not None:
                         quality_start = time.perf_counter()
                         for tracked_detection in tracked_detections:
+                            if not bool(tracked_detection.get("top_k_eligible", True)):
+                                continue
                             crop = self._crop_from_frame(
                                 frame,
                                 tracked_detection.get("box"),
@@ -261,17 +375,39 @@ class VideoProcessor:
                 track_summaries = self.tracker.track_summaries()
 
             best_crop_summaries: list[dict[str, Any]] = []
+            stitching_diagnostics: dict[str, Any] = {
+                "enabled": self.stitching_enabled,
+                "metrics": {
+                    "raw_track_count": len(track_summaries),
+                    "recognized_tracklets": 0,
+                    "final_plate_event_count": 0,
+                    "number_of_merges": 0,
+                    "exact_ocr_merges": 0,
+                    "fuzzy_distance1_merges": 0,
+                    "rejected_time": 0,
+                    "rejected_spatial": 0,
+                    "rejected_overlap": 0,
+                    "rejected_ocr": 0,
+                    "ambiguous_cases": 0,
+                    "stitching_ms": 0.0,
+                    "final_crop_count": 0,
+                },
+                "events": [],
+                "decisions": [],
+            }
             if self.quality_evaluator is not None:
-                best_crop_summaries = self._save_best_crops(
+                best_crop_summaries, stitching_diagnostics = self._save_best_crops(
                     source_stem=source.stem,
                     output_paths=output_paths,
                     fps=fps,
                     track_summaries=track_summaries,
                     best_candidates=best_candidates,
+                    track_observations=track_observations,
                     ocr_report=ocr_report,
                 )
 
             total_processing_seconds = time.perf_counter() - processing_start
+            average_frame_ms = (total_processing_seconds / processed_frames) * 1000.0
 
             avg_detect_ms = (total_detect_seconds / processed_frames) * 1000.0
             detector_fps = (
@@ -332,7 +468,12 @@ class VideoProcessor:
                 "invalid_crops": invalid_crops,
                 "avg_quality_ms": avg_quality_ms,
                 "tracks_with_best_crop": len(best_crop_summaries),
-                "tracks_without_valid_crop": len(track_summaries) - len(best_crop_summaries),
+                "tracks_without_valid_crop": len(track_summaries)
+                - int(
+                    stitching_diagnostics["metrics"].get(
+                        "tracklets_with_candidates", 0
+                    )
+                ),
                 "min_best_quality": min(best_qualities) if best_qualities else None,
                 "max_best_quality": max(best_qualities) if best_qualities else None,
                 "avg_best_quality": (
@@ -344,6 +485,7 @@ class VideoProcessor:
                 "ocr_report": ocr_report,
                 "ocr_calls": self.ocr_calls,
                 "avg_ocr_ms": self.ocr_total_ms / self.ocr_calls if self.ocr_calls else 0.0,
+                "stitching": stitching_diagnostics,
             }
             if self.result_writer is not None:
                 try:
@@ -352,9 +494,12 @@ class VideoProcessor:
                         width=width,
                         height=height,
                         fps=fps,
-                        frames=frame_count,
+                        frames=processed_frames,
                         plates=best_crop_summaries,
                         request_id=output_paths.request_id if output_paths is not None else None,
+                        output_video=output_path,
+                        processing_total_ms=total_processing_seconds * 1000.0,
+                        average_frame_ms=average_frame_ms,
                     )
                     result["official_result"] = official_result
                     if self.write_json:
@@ -544,25 +689,32 @@ class VideoProcessor:
         del retained[self.top_k:]
 
     @staticmethod
-    def _is_better_candidate(
-        candidate: _BestCandidate,
-        current: _BestCandidate,
-    ) -> bool:
-        # Deterministic tie-break order: quality, sharpness, confidence, then
-        # earlier frame. The frame is not used to influence tracking itself.
-        candidate_key = (
-            candidate.quality,
-            candidate.sharpness,
-            candidate.conf,
-            -candidate.best_frame,
-        )
-        current_key = (
-            current.quality,
-            current.sharpness,
-            current.conf,
-            -current.best_frame,
-        )
-        return candidate_key > current_key
+    def _record_track_observations(
+        observations: dict[int, _TrackObservation],
+        detections: Sequence[Mapping[str, Any]],
+        frame_index: int,
+    ) -> None:
+        """Record detector-backed boundary boxes, never Kalman-only predictions."""
+
+        for detection in detections:
+            try:
+                track_id = int(detection["track_id"])
+                box = [int(round(float(value))) for value in detection["box"]]
+            except (KeyError, TypeError, ValueError, OverflowError):
+                continue
+            if len(box) != 4 or box[0] >= box[2] or box[1] >= box[3]:
+                continue
+            current = observations.get(track_id)
+            if current is None:
+                observations[track_id] = _TrackObservation(
+                    first_frame=frame_index,
+                    last_frame=frame_index,
+                    first_box=box.copy(),
+                    last_box=box.copy(),
+                )
+            else:
+                current.last_frame = frame_index
+                current.last_box = box.copy()
 
     def _save_best_crops(
         self,
@@ -571,10 +723,11 @@ class VideoProcessor:
         fps: float,
         track_summaries: Sequence[Mapping[str, int]],
         best_candidates: Mapping[int, list[_BestCandidate]],
+        track_observations: Mapping[int, _TrackObservation],
         ocr_report: list[dict[str, Any]],
-    ) -> list[dict[str, Any]]:
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         crops_dir = output_paths.crops_dir if output_paths is not None else self.output_dir / "crops"
-        saved: list[dict[str, Any]] = []
+        tracklets: list[Tracklet] = []
         for track in track_summaries:
             track_id = int(track["track_id"])
             retained = best_candidates.get(track_id, [])
@@ -582,6 +735,7 @@ class VideoProcessor:
                 continue
 
             voted_candidates: list[dict[str, Any]] = []
+            recognized_candidates: list[TrackletCandidate] = []
             for candidate in retained:
                 raw_text = ""
                 ocr_conf = 0.0
@@ -599,18 +753,41 @@ class VideoProcessor:
                 normalized_text = PlateNormalizer.normalize(raw_text)
                 if not normalized_text:
                     ocr_conf = 0.0
-                voted_candidates.append({
+                vote_input = {
                     "raw_text": raw_text,
                     "text": normalized_text,
                     "ocr_conf": ocr_conf,
                     "quality": candidate.quality,
-                })
+                }
+                voted_candidates.append(vote_input)
+                recognized_candidates.append(
+                    TrackletCandidate(
+                        track_id=track_id,
+                        frame_index=candidate.best_frame,
+                        detection_confidence=candidate.conf,
+                        quality=candidate.quality,
+                        sharpness=candidate.sharpness,
+                        sharpness_raw=candidate.sharpness_raw,
+                        brightness=candidate.brightness,
+                        brightness_raw=candidate.brightness_raw,
+                        size=candidate.size,
+                        crop_width=candidate.crop_width,
+                        crop_height=candidate.crop_height,
+                        crop_area=candidate.crop_area,
+                        aspect_ratio=candidate.aspect_ratio,
+                        box=tuple(candidate.box),
+                        crop=candidate.crop,
+                        raw_text=raw_text,
+                        plate_text=normalized_text,
+                        ocr_confidence=ocr_conf,
+                    )
+                )
 
             vote = OCRVoter.vote(voted_candidates)
             winner_index = vote["winner_index"]
             # If every OCR is empty, keep the highest-quality crop and track.
             selected_index = winner_index if winner_index is not None else 0
-            candidate = retained[selected_index]
+            candidate = recognized_candidates[selected_index]
             ocr_report.append({
                 "track_id": track_id,
                 "candidates_retained": len(retained),
@@ -626,14 +803,44 @@ class VideoProcessor:
                 ],
                 "winner": {
                     "text": vote["text"],
-                    "frame": candidate.best_frame,
+                    "frame": candidate.frame_index,
                     "weight": vote["vote_weight"],
                 },
             })
+            observation = track_observations.get(track_id)
+            if observation is None:
+                ordered_candidates = sorted(
+                    recognized_candidates, key=lambda item: item.frame_index
+                )
+                first_box = ordered_candidates[0].box
+                last_box = ordered_candidates[-1].box
+            else:
+                first_box = tuple(observation.first_box)
+                last_box = tuple(observation.last_box)
+            tracklets.append(
+                Tracklet(
+                    track_id=track_id,
+                    first_detected_frame=int(track["first_frame"]),
+                    last_detected_frame=int(track["last_frame"]),
+                    first_box=first_box,
+                    last_box=last_box,
+                    hits=int(track["hits"]),
+                    plate_text=str(vote["text"]),
+                    ocr_confidence=float(vote["ocr_conf"]),
+                    candidates=tuple(recognized_candidates),
+                    selected_candidate=candidate,
+                )
+            )
 
+        stitch_result = TrackletStitcher(self.stitch_config).stitch(tracklets, fps)
+        saved: list[dict[str, Any]] = []
+        event_diagnostics: list[dict[str, Any]] = []
+        for event in stitch_result.events:
+            candidate = event.best_candidate
             crop_path = (
-                crops_dir / f"track_{track_id:04d}.jpg"
-                if output_paths is not None else crops_dir / f"{source_stem}_track_{track_id:04d}.jpg"
+                crops_dir / f"track_{candidate.track_id:04d}.jpg"
+                if output_paths is not None
+                else crops_dir / f"{source_stem}_track_{candidate.track_id:04d}.jpg"
             )
             if not cv2.imwrite(str(crop_path), candidate.crop):
                 raise VideoProcessingError(f"Could not save best crop: {crop_path}")
@@ -641,15 +848,19 @@ class VideoProcessor:
             if saved_crop is None or saved_crop.size == 0:
                 raise VideoProcessingError(f"Saved best crop could not be reopened: {crop_path}")
 
+            event_hits = sum(tracklet.hits for tracklet in event.tracklets)
             saved.append(
                 {
-                    "track_id": track_id,
-                    "first_frame": int(track["first_frame"]),
-                    "last_frame": int(track["last_frame"]),
-                    "hits": int(track["hits"]),
-                    "best_frame": candidate.best_frame,
-                    "best_time": (candidate.best_frame - 1) / fps,
-                    "conf": candidate.conf,
+                    # Compatibility diagnostic: the final crop's source track.
+                    "track_id": candidate.track_id,
+                    "event_id": event.event_id,
+                    "member_track_ids": event.member_track_ids,
+                    "first_frame": event.first_detected_frame,
+                    "last_frame": event.last_detected_frame,
+                    "hits": event_hits,
+                    "best_frame": candidate.frame_index,
+                    "best_time": (candidate.frame_index - 1) / fps,
+                    "conf": candidate.detection_confidence,
                     "quality": candidate.quality,
                     "sharpness": candidate.sharpness,
                     "sharpness_raw": candidate.sharpness_raw,
@@ -660,14 +871,43 @@ class VideoProcessor:
                     "crop_height": candidate.crop_height,
                     "crop_area": candidate.crop_area,
                     "aspect_ratio": candidate.aspect_ratio,
-                    "box": candidate.box,
+                    "box": list(candidate.box),
                     "crop": self._project_relative_path(crop_path),
-                    "raw_text": vote["raw_text"],
-                    "text": vote["text"],
-                    "ocr_conf": vote["ocr_conf"],
+                    "raw_text": candidate.raw_text,
+                    "text": event.canonical_plate_text,
+                    # Same final candidate as crop/frame/detection confidence.
+                    "ocr_conf": candidate.ocr_confidence,
                 }
             )
-        return saved
+            event_diagnostics.append(
+                {
+                    "event_id": event.event_id,
+                    "member_track_ids": event.member_track_ids,
+                    "first_detected_frame": event.first_detected_frame,
+                    "last_detected_frame": event.last_detected_frame,
+                    "canonical_plate_text": event.canonical_plate_text,
+                    "best_track_id": candidate.track_id,
+                    "best_frame_index": candidate.frame_index,
+                }
+            )
+
+        metrics = dict(stitch_result.metrics)
+        metrics["raw_track_count"] = len(track_summaries)
+        metrics["tracklets_with_candidates"] = len(tracklets)
+        metrics["final_crop_count"] = len(saved)
+        diagnostics = {
+            "enabled": self.stitching_enabled,
+            "config": {
+                "max_gap_sec": self.stitch_config.max_gap_sec,
+                "max_edit_distance": self.stitch_config.max_edit_distance,
+                "min_fuzzy_text_length": self.stitch_config.min_fuzzy_text_length,
+                "max_center_distance_ratio": self.stitch_config.max_center_distance_ratio,
+            },
+            "metrics": metrics,
+            "events": event_diagnostics,
+            "decisions": [dict(item) for item in stitch_result.decisions],
+        }
+        return saved, diagnostics
 
     def _project_relative_path(self, path: Path) -> str:
         try:

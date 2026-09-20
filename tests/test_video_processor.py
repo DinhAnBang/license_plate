@@ -118,6 +118,7 @@ def main() -> int:
             output_dir=project_dir / "output",
             project_root=project_dir,
             tracker=tracker,
+            tracker_mode="legacy" if tracker is not None else "disabled",
             quality_evaluator=quality_evaluator,
             result_writer=result_writer,
         )
@@ -209,13 +210,22 @@ def main() -> int:
         print("\nOfficial JSON:")
         print(json_path.read_text(encoding="utf-8"))
         official = json.loads(json_path.read_text(encoding="utf-8"))
-        assert official["status"] == "ok" and official["type"] == "video"
+        assert official["status"] == "success" and official["input_type"] == "video"
         assert official["count"] == len(official["plates"])
+        assert official["processing"]["frames"] == result["processed_frames"]
+        assert official["processing"]["average_frame_ms"] == round(
+            official["processing"]["total_ms"] / official["processing"]["frames"], 6
+        )
         for plate in official["plates"]:
-            assert {"id", "first", "last", "hits", "best_frame", "time", "conf", "quality", "box", "crop", "raw_text", "text", "ocr_conf"}.issubset(plate)
-            assert plate["first"] <= plate["best_frame"] <= plate["last"]
-            assert plate["time"] == round((plate["best_frame"] - 1) / official["fps"], 6)
-            assert (project_dir / plate["crop"]).is_file()
+            assert set(plate) == {
+                "plate_text", "detection_confidence", "ocr_confidence",
+                "first_detected_frame", "last_detected_frame",
+                "first_detected_time_sec", "last_detected_time_sec",
+                "best_frame_index", "best_frame_time_sec", "crop_path",
+            }
+            assert plate["first_detected_frame"] <= plate["best_frame_index"] <= plate["last_detected_frame"]
+            assert plate["first_detected_time_sec"] <= plate["best_frame_time_sec"] <= plate["last_detected_time_sec"]
+            assert Path(plate["crop_path"]).is_file()
         assert result["ocr_calls"] <= len(official["plates"]) * processor.top_k
         assert processor.ocr.session_creation_count == 1
         print("\nTOP-K OCR REPORT")

@@ -8,6 +8,16 @@ from typing import Any, TypedDict
 import cv2
 import numpy as np
 
+from .config import (
+    QUALITY_BRIGHTNESS_TARGET,
+    QUALITY_BRIGHTNESS_WEIGHT,
+    QUALITY_CONFIDENCE_WEIGHT,
+    QUALITY_REFERENCE_AREA,
+    QUALITY_SHARPNESS_REFERENCE,
+    QUALITY_SHARPNESS_WEIGHT,
+    QUALITY_SIZE_WEIGHT,
+)
+
 
 class QualityMetrics(TypedDict):
     quality: float
@@ -27,13 +37,13 @@ class PlateQualityEvaluator:
 
     def __init__(
         self,
-        confidence_weight: float = 0.30,
-        sharpness_weight: float = 0.35,
-        brightness_weight: float = 0.15,
-        size_weight: float = 0.20,
-        sharpness_reference: float = 500.0,
-        brightness_target: float = 127.5,
-        reference_area: float = 12_000.0,
+        confidence_weight: float = QUALITY_CONFIDENCE_WEIGHT,
+        sharpness_weight: float = QUALITY_SHARPNESS_WEIGHT,
+        brightness_weight: float = QUALITY_BRIGHTNESS_WEIGHT,
+        size_weight: float = QUALITY_SIZE_WEIGHT,
+        sharpness_reference: float = QUALITY_SHARPNESS_REFERENCE,
+        brightness_target: float = QUALITY_BRIGHTNESS_TARGET,
+        reference_area: float = QUALITY_REFERENCE_AREA,
     ) -> None:
         weights = {
             "confidence": float(confidence_weight),

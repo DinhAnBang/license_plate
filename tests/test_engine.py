@@ -38,12 +38,22 @@ class FakeDetector:
         self.detect_calls = 0
         self.fail_once = False
 
-    def detect(self, image: np.ndarray) -> list[dict]:
+    def detect(self, image: np.ndarray, *, conf_threshold: float | None = None) -> list[dict]:
         self.detect_calls += 1
         if self.fail_once:
             self.fail_once = False
             raise RuntimeError("synthetic detector failure")
         return [{"conf": 0.9, "box": [20, 20, 100, 60]}]
+
+    def detect_with_stats(
+        self, image: np.ndarray, *, conf_threshold: float | None = None
+    ) -> tuple[list[dict], dict[str, int]]:
+        detections = self.detect(image, conf_threshold=conf_threshold)
+        return detections, {
+            "raw_detector_candidates": 1,
+            "detections_after_threshold": len(detections),
+            "detections_after_nms": len(detections),
+        }
 
 
 class FakeOCR:
@@ -94,7 +104,7 @@ def test_shared_lifetime(root: Path) -> None:
     assert failed["error"]["code"] == "PROCESSING_ERROR"
     assert engine.state == engine.READY
     good = engine.handle_request({"id": "good", "action": "process", "type": "image", "path": "input/a.jpg"})
-    assert good["result"]["plates"][0]["text"] == "72A16231"
+    assert good["plates"][0]["plate_text"] == "72A16231"
     assert not (root / "output/requests/good/result.json").exists()
     assert not (root / "output/requests/fail").exists()
     engine.shutdown()
@@ -141,30 +151,44 @@ def test_json_lines(root: Path) -> None:
     responses = objects[2:]
     expected_ids = [item["id"] for item in requests]
     expected_ids.insert(7, None)
-    assert [item["id"] for item in responses] == expected_ids
-    by_id = {item["id"]: item for item in responses}
+    def response_id(item: dict) -> str | None:
+        return item.get("request_id", item.get("id"))
+
+    assert [response_id(item) for item in responses] == expected_ids
+    by_id = {response_id(item): item for item in responses}
     assert by_id["004"]["error"]["code"] == "UNSUPPORTED_ACTION"
     assert by_id["004a"]["error"]["code"] == "INVALID_REQUEST"
     assert by_id["004b"]["error"]["code"] == "UNSUPPORTED_TYPE"
     assert by_id["../escape"]["error"]["code"] == "INVALID_REQUEST_ID"
     assert by_id[None]["error"]["code"] == "INVALID_REQUEST"
     assert by_id["006"]["error"]["code"] == "INPUT_NOT_FOUND"
-    assert all(by_id[key]["status"] == "ok" for key in ("005", "007", "008", "009"))
+    assert by_id["005"]["status"] == "success"
+    assert by_id["007"]["status"] == "success"
+    assert by_id["009"]["status"] == "ok"
     assert by_id["010"] == {"id": "010", "status": "ok", "state": "shutting_down"}
     assert engine.state == engine.STOPPED
     assert detector.session.runs == ocr.session.runs == 1
     assert ocr.recognize_calls == 4 + 3  # four images plus video Top-3
 
-    image_result = by_id["002"]["result"]
-    video_result = by_id["008"]["result"]
-    assert image_result["type"] == "image" and image_result["count"] == 1
-    assert video_result["type"] == "video" and video_result["count"] == 1
+    image_result = by_id["002"]
+    video_result = by_id["008"]
+    assert image_result["input_type"] == "image" and image_result["count"] == 1
+    assert video_result["input_type"] == "video" and video_result["count"] == 1
     assert image_result["request_id"] == "002" and video_result["request_id"] == "008"
-    assert "ocr_report" not in video_result and "candidates" not in video_result["plates"][0]
+    assert set(image_result) == {
+        "status", "request_id", "input_type", "output_image", "processing", "count", "plates"
+    }
+    assert set(video_result) == {
+        "status", "request_id", "input_type", "output_video", "processing", "count", "plates"
+    }
+    assert "raw_text" not in image_result["plates"][0]
+    assert "track_id" not in video_result["plates"][0]
     assert (root / "output/requests/002/annotated.jpg").is_file()
-    assert (root / image_result["plates"][0]["crop"]).is_file()
+    assert Path(image_result["output_image"]).is_file()
+    assert Path(image_result["plates"][0]["crop_path"]).is_file()
     assert (root / "output/requests/008/annotated.mp4").is_file()
-    assert (root / video_result["plates"][0]["crop"]).is_file()
+    assert Path(video_result["output_video"]).is_file()
+    assert Path(video_result["plates"][0]["crop_path"]).is_file()
     for request_id, result in (("002", image_result), ("008", video_result)):
         saved = json.loads((root / f"output/requests/{request_id}/result.json").read_text(encoding="utf-8"))
         assert saved == result

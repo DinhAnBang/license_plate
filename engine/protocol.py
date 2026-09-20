@@ -60,9 +60,15 @@ def validate_request(value: Any) -> dict[str, Any]:
     return value
 
 
-def error_response(request_id: Any, code: str, message: str) -> dict[str, Any]:
+def error_response(
+    request_id: Any,
+    code: str,
+    message: str,
+    input_type: Any = None,
+) -> dict[str, Any]:
     return {
-        "id": request_id if isinstance(request_id, (str, int)) and not isinstance(request_id, bool) else None,
+        "request_id": request_id if isinstance(request_id, str) else None,
+        "input_type": input_type if input_type in {"image", "video"} else None,
         "status": "error",
         "error": {"code": code, "message": message[:300]},
     }

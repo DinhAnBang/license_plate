@@ -29,16 +29,16 @@ def process(engine: AIPlateEngine, request_id: str, media_type: str, path: Path)
     response = engine.handle_request({
         "id": request_id, "action": "process", "type": media_type, "path": str(path)
     })
-    assert response["status"] == "ok", response
-    assert response["result"]["request_id"] == request_id
-    return response["result"]
+    assert response["status"] == "success", response
+    assert response["request_id"] == request_id
+    return response
 
 
 def check_saved(root: Path, request_id: str, result: dict) -> Path:
     request_dir = root / "output" / "requests" / request_id
     assert json.loads((request_dir / "result.json").read_text(encoding="utf-8")) == result
-    assert all((root / plate["crop"]).is_file() for plate in result["plates"])
-    assert all(plate["crop"].startswith(f"output/requests/{request_id}/crops/") for plate in result["plates"])
+    assert all(Path(plate["crop_path"]).is_file() for plate in result["plates"])
+    assert all(Path(plate["crop_path"]).is_absolute() for plate in result["plates"])
     return request_dir
 
 
@@ -102,7 +102,7 @@ def main() -> int:
             request_dir = check_saved(root, request_id, result)
             assert (request_dir / annotated).is_file()
         assert video_result["count"] == 1
-        assert video_result["plates"][0]["crop"].endswith("/track_0001.jpg")
+        assert video_result["plates"][0]["crop_path"].endswith("track_0001.jpg")
 
         detector.count = 0
         empty_image = process(engine, "empty-image", "image", source_a)

@@ -7,6 +7,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, TypedDict
 
+from .config import LEGACY_IOU_THRESHOLD, LEGACY_MAX_MISSED
+
 
 class TrackedDetection(TypedDict):
     track_id: int
@@ -60,7 +62,11 @@ def calculate_iou(box_a: Sequence[float], box_b: Sequence[float]) -> float:
 class PlateTracker:
     """Track detections with greedy, one-to-one IoU matching."""
 
-    def __init__(self, iou_threshold: float = 0.3, max_missed: int = 10) -> None:
+    def __init__(
+        self,
+        iou_threshold: float = LEGACY_IOU_THRESHOLD,
+        max_missed: int = LEGACY_MAX_MISSED,
+    ) -> None:
         if not 0.0 <= iou_threshold <= 1.0:
             raise ValueError("iou_threshold must be between 0.0 and 1.0")
         if max_missed < 0:

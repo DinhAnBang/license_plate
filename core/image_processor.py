@@ -13,9 +13,10 @@ from typing import TYPE_CHECKING, Any
 import cv2
 import numpy as np
 
-from .detector import Detection, DetectorError, PlateDetector
+from .detector import DetectorError, PlateDetector
 from .ocr import MicroCharNetOCR
 from .plate_normalizer import PlateNormalizer
+from .result_serializer import build_image_result
 
 if TYPE_CHECKING:
     from engine.output_manager import RequestOutputPaths
@@ -67,6 +68,7 @@ class ImageProcessor:
         source = source.resolve()
         if not source.is_file():
             raise ImageProcessingError(f"Input image does not exist: {source}")
+        processing_start = time.perf_counter()
 
         image = cv2.imread(str(source), cv2.IMREAD_COLOR)
         if image is None:
@@ -150,6 +152,14 @@ class ImageProcessor:
         if not cv2.imwrite(str(annotated_path), annotated):
             raise ImageProcessingError(f"Could not save annotated image: {annotated_path}")
 
+        production_result = build_image_result(
+            request_id=output_paths.request_id if output_paths is not None else None,
+            output_image=annotated_path,
+            processing_total_ms=(time.perf_counter() - processing_start) * 1000.0,
+            plates=plates,
+            project_root=self.project_root,
+        )
+
         result: dict[str, Any] = {
             "status": "ok",
             "type": "image",
@@ -157,11 +167,12 @@ class ImageProcessor:
             "size": {"w": width, "h": height},
             "count": len(plates),
             "plates": plates,
+            "production_result": production_result,
         }
         if output_paths is not None:
             result["request_id"] = output_paths.request_id
         if self.write_json:
-            self._write_json(json_path, result)
+            self._write_json(json_path, production_result)
         elif json_path.is_file():
             try:
                 json_path.unlink()

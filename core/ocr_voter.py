@@ -5,11 +5,13 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from .config import OCR_VOTE_CONFIDENCE_WEIGHT, OCR_VOTE_QUALITY_WEIGHT
+
 
 class OCRVoter:
     @staticmethod
     def weight(candidate: Mapping[str, Any]) -> float:
-        return 0.70 * float(candidate["ocr_conf"]) + 0.30 * float(candidate["quality"])
+        return OCR_VOTE_CONFIDENCE_WEIGHT * float(candidate["ocr_conf"]) + OCR_VOTE_QUALITY_WEIGHT * float(candidate["quality"])
 
     @classmethod
     def vote(cls, candidates: Sequence[Mapping[str, Any]]) -> dict[str, Any]:

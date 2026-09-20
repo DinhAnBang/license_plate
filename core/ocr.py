@@ -16,6 +16,8 @@ import cv2
 import numpy as np
 import onnxruntime as ort
 
+from .config import OCR_CONF_THRESHOLD, OCR_NMS_IOU_THRESHOLD
+
 
 # Verified against the model's ONNX ``names`` metadata and the MicroCharNet
 # dataset YAML. Runtime still reads the mapping from ONNX metadata below so a
@@ -233,8 +235,8 @@ class MicroCharNetOCR:
     def __init__(
         self,
         model_path: str | Path = "models/OCR/microcharnet.onnx",
-        conf_threshold: float = 0.25,
-        iou_threshold: float = 0.70,
+        conf_threshold: float = OCR_CONF_THRESHOLD,
+        iou_threshold: float = OCR_NMS_IOU_THRESHOLD,
     ) -> None:
         if not 0.0 <= conf_threshold <= 1.0:
             raise ValueError("conf_threshold must be between 0 and 1")

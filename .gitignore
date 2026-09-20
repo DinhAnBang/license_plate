@@ -1,13 +1,11 @@
 __pycache__/
 *.pyc
 output/
-input/*.mp4
+input/
+models/
 build/
 dist/
 venv_runtime/
-# AI models - local only
-*.onnx
-*.pt
 
 # local model backups
 local_backup/

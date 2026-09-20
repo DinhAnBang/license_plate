@@ -37,6 +37,8 @@ def main() -> int:
                 "quality": np.float32(0.72),
                 "box": [np.int64(10), np.int64(20), np.int64(80), np.int64(50)],
                 "crop": "output/crops/test_track_0007.jpg",
+                "text": "",
+                "ocr_conf": np.float32(0.0),
             },
             {
                 "track_id": np.int64(3),
@@ -48,6 +50,8 @@ def main() -> int:
                 "quality": np.float32(0.81),
                 "box": [np.int64(1), np.int64(2), np.int64(60), np.int64(40)],
                 "crop": "output/crops/test_track_0003.jpg",
+                "text": "",
+                "ocr_conf": np.float32(0.0),
             },
         ]
 
@@ -62,12 +66,14 @@ def main() -> int:
         saved_path = project_root / json_path
         data = json.loads(saved_path.read_text(encoding="utf-8"))
         assert data["count"] == len(data["plates"]) == 2
-        assert [plate["id"] for plate in data["plates"]] == [3, 7]
-        assert data["plates"][0]["time"] == 0.2
-        assert all(type(plate["id"]) is int for plate in data["plates"])
-        assert all(type(plate["conf"]) is float for plate in data["plates"])
-        assert all(plate["raw_text"] == plate["text"] == "" for plate in data["plates"])
-        assert all(plate["ocr_conf"] == 0.0 for plate in data["plates"])
+        assert [plate["first_detected_frame"] for plate in data["plates"]] == [2, 20]
+        assert data["plates"][0]["best_frame_time_sec"] == 0.2
+        assert all(type(plate["detection_confidence"]) is float for plate in data["plates"])
+        assert all(plate["plate_text"] == "" and plate["ocr_confidence"] == 0.0 for plate in data["plates"])
+        assert all(Path(plate["crop_path"]).is_absolute() for plate in data["plates"])
+        assert set(data) == {
+            "status", "request_id", "input_type", "output_video", "processing", "count", "plates"
+        }
 
         empty = writer.build_result(
             source_path="input/no_plate.mp4",
@@ -79,7 +85,7 @@ def main() -> int:
         )
         assert empty["count"] == 0
         assert empty["plates"] == []
-        assert empty["duration"] == 10.0
+        assert empty["processing"] == {"total_ms": 0.0, "frames": 300, "average_frame_ms": 0.0}
 
     print("Video JSON contract tests: OK")
     print("Normal result: count=2, sorted by first frame")

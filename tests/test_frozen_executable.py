@@ -23,10 +23,10 @@ def send(process: subprocess.Popen[str], request: dict) -> dict:
 
 
 def check_result(response: dict, media_type: str) -> tuple[Path, dict[str, int]]:
-    request_id = response["id"]
-    result = response["result"]
-    assert response["status"] == "ok"
-    assert result["status"] == "ok" and result["type"] == media_type
+    request_id = response["request_id"]
+    result = response
+    assert response["status"] == "success"
+    assert result["input_type"] == media_type
     assert result["request_id"] == request_id
     request_dir = EXE.parent / "output" / "requests" / request_id
     annotated = request_dir / ("annotated.jpg" if media_type == "image" else "annotated.mp4")
@@ -36,9 +36,9 @@ def check_result(response: dict, media_type: str) -> tuple[Path, dict[str, int]]
     assert result["count"] == len(result["plates"])
     assert result["count"] > 0
     for plate in result["plates"]:
-        assert plate["crop"].startswith(f"output/requests/{request_id}/crops/")
-        assert "_MEI" not in plate["crop"]
-        assert (EXE.parent / plate["crop"]).is_file()
+        assert Path(plate["crop_path"]).is_absolute()
+        assert "_MEI" not in plate["crop_path"]
+        assert Path(plate["crop_path"]).is_file()
     sizes = {str(path.relative_to(request_dir)): path.stat().st_size for path in request_dir.rglob("*") if path.is_file()}
     assert sizes and all(size > 0 for size in sizes.values())
     return request_dir, sizes

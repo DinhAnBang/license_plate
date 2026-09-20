@@ -10,11 +10,23 @@ from typing import Any
 import numpy as np
 
 from core.detector import PlateDetector
+from core.config import (
+    BYTE_HIGH_THRESHOLD,
+    DETECTOR_CONF_THRESHOLD,
+    DETECTOR_NMS_IOU_THRESHOLD,
+    QUALITY_BRIGHTNESS_TARGET,
+    QUALITY_BRIGHTNESS_WEIGHT,
+    QUALITY_CONFIDENCE_WEIGHT,
+    QUALITY_REFERENCE_AREA,
+    QUALITY_SHARPNESS_REFERENCE,
+    QUALITY_SHARPNESS_WEIGHT,
+    QUALITY_SIZE_WEIGHT,
+    RECOGNITION_TOP_K,
+)
 from core.image_processor import ImageProcessor
 from core.ocr import MicroCharNetOCR
 from core.quality import PlateQualityEvaluator
 from core.result_writer import VideoResultWriter
-from core.tracker import PlateTracker
 from core.video_processor import VideoProcessor
 
 from .protocol import ProtocolError, error_response, validate_request
@@ -44,7 +56,10 @@ class AIPlateEngine:
         ocr: MicroCharNetOCR | None = None,
         write_json: bool = True,
         resource_root: str | Path | None = None,
+        tracker_mode: str = "sort",
     ) -> None:
+        if tracker_mode not in {"legacy", "sort", "byte"}:
+            raise ValueError("tracker_mode must be 'legacy', 'sort', or 'byte'")
         self.resource_root = Path(resource_root).resolve() if resource_root is not None else get_resource_root()
         self.app_root = Path(project_root).resolve() if project_root is not None else get_app_root()
         # Keep this alias for the Phase 1-10 processors, where it means the
@@ -55,6 +70,7 @@ class AIPlateEngine:
         self.detector = detector
         self.ocr = ocr
         self.write_json = write_json
+        self.tracker_mode = tracker_mode
         self.output_manager = RequestOutputManager(self.app_root)
         self.image_processor: ImageProcessor | None = None
         self.video_processor: VideoProcessor | None = None
@@ -87,8 +103,8 @@ class AIPlateEngine:
                     raise FileNotFoundError(f"Detector model not found: {self.detector_model}")
                 self.detector = PlateDetector(
                     self.detector_model,
-                    conf_threshold=0.5,
-                    iou_threshold=0.45,
+                    conf_threshold=DETECTOR_CONF_THRESHOLD,
+                    iou_threshold=DETECTOR_NMS_IOU_THRESHOLD,
                     providers=["CPUExecutionProvider"],
                 )
             if self.ocr is None:
@@ -112,23 +128,23 @@ class AIPlateEngine:
                 self.detector,
                 output_dir=self.project_root / "output",
                 project_root=self.project_root,
-                tracker=PlateTracker(iou_threshold=0.25, max_missed=10),
                 quality_evaluator=PlateQualityEvaluator(
-                    confidence_weight=0.30,
-                    sharpness_weight=0.35,
-                    brightness_weight=0.15,
-                    size_weight=0.20,
-                    sharpness_reference=500.0,
-                    brightness_target=127.5,
-                    reference_area=12_000.0,
+                    confidence_weight=QUALITY_CONFIDENCE_WEIGHT,
+                    sharpness_weight=QUALITY_SHARPNESS_WEIGHT,
+                    brightness_weight=QUALITY_BRIGHTNESS_WEIGHT,
+                    size_weight=QUALITY_SIZE_WEIGHT,
+                    sharpness_reference=QUALITY_SHARPNESS_REFERENCE,
+                    brightness_target=QUALITY_BRIGHTNESS_TARGET,
+                    reference_area=QUALITY_REFERENCE_AREA,
                 ),
                 result_writer=VideoResultWriter(
                     output_dir=self.project_root / "output" / "json",
                     project_root=self.project_root,
                 ),
                 ocr=self.ocr,
-                top_k=3,
+                top_k=RECOGNITION_TOP_K,
                 write_json=self.write_json,
+                tracker_mode=self.tracker_mode,
             )
             self.startup_ms = (time.perf_counter() - started) * 1000.0
             self.state = self.READY
@@ -153,13 +169,19 @@ class AIPlateEngine:
 
     def handle_request(self, value: Any) -> dict[str, Any]:
         request_id = value.get("id") if isinstance(value, dict) else None
+        input_type = value.get("type") if isinstance(value, dict) else None
         try:
             request = validate_request(value)
         except ProtocolError as exc:
-            return error_response(request_id, exc.code, exc.message)
+            return error_response(request_id, exc.code, exc.message, input_type)
 
         if self.state != self.READY:
-            return error_response(request_id, "ENGINE_NOT_READY", f"Engine state is {self.state}.")
+            return error_response(
+                request_id,
+                "ENGINE_NOT_READY",
+                f"Engine state is {self.state}.",
+                input_type,
+            )
 
         action = request["action"]
         if action == "ping":
@@ -170,7 +192,12 @@ class AIPlateEngine:
 
         source = self._resolve_input_path(request["path"])
         if not source.is_file():
-            return error_response(request_id, "INPUT_NOT_FOUND", f"Input file not found: {source}")
+            return error_response(
+                request_id,
+                "INPUT_NOT_FOUND",
+                f"Input file not found: {source}",
+                request["type"],
+            )
 
         self.state = self.PROCESSING
         output_paths = None
@@ -179,15 +206,16 @@ class AIPlateEngine:
             self.output_manager.prepare(output_paths)
             assert self.detector is not None
             if request["type"] == "image":
-                self.detector.conf_threshold = 0.5
+                self.detector.conf_threshold = DETECTOR_CONF_THRESHOLD
                 assert self.image_processor is not None
-                result = self.image_processor.process(source, output_paths=output_paths)
+                internal_result = self.image_processor.process(source, output_paths=output_paths)
+                result = internal_result["production_result"]
             else:
-                self.detector.conf_threshold = 0.7
+                self.detector.conf_threshold = BYTE_HIGH_THRESHOLD
                 assert self.video_processor is not None
                 video_result = self.video_processor.process(source, output_paths=output_paths)
                 result = video_result["official_result"]
-            return {"id": request_id, "status": "ok", "result": result}
+            return result
         except Exception as exc:
             LOGGER.exception("Request %r failed", request_id)
             if output_paths is not None:
@@ -195,7 +223,7 @@ class AIPlateEngine:
                     self.output_manager.cleanup(output_paths)
                 except Exception:
                     LOGGER.exception("Could not clean partial output for request %r", request_id)
-            return error_response(request_id, "PROCESSING_ERROR", str(exc))
+            return error_response(request_id, "PROCESSING_ERROR", str(exc), request["type"])
         finally:
             self.state = self.READY
 

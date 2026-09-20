@@ -16,22 +16,23 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def _check_outputs(response: dict, media_type: str) -> None:
-    result = response["result"]
-    assert result["status"] == "ok" and result["type"] == media_type
-    assert result["request_id"] == response["id"]
+    result = response
+    assert result["status"] == "success" and result["input_type"] == media_type
+    assert result["request_id"] == response["request_id"]
     assert result["count"] == len(result["plates"])
-    request_dir = ROOT / "output" / "requests" / response["id"]
+    request_dir = ROOT / "output" / "requests" / response["request_id"]
     saved_json = request_dir / "result.json"
     assert json.loads(saved_json.read_text(encoding="utf-8")) == result
 
     for plate in result["plates"]:
-        assert (ROOT / plate["crop"]).is_file()
-        assert {"raw_text", "text", "ocr_conf"}.issubset(plate)
+        assert Path(plate["crop_path"]).is_file()
+        assert "raw_text" not in plate and "text" not in plate
     if media_type == "image":
         assert (request_dir / "annotated.jpg").is_file()
+        assert Path(result["output_image"]).is_file()
     else:
         assert (request_dir / "annotated.mp4").is_file()
-        assert all("candidates" not in item and "vote_weight" not in item for item in result["plates"])
+        assert Path(result["output_video"]).is_file()
 
 
 def main() -> int:
@@ -98,10 +99,13 @@ def main() -> int:
         process.stdout.close()
         process.stderr.close()
 
-    assert [item["id"] for item in responses] == [item["id"] for item in requests]
+    def response_id(item: dict) -> str | None:
+        return item.get("request_id", item.get("id"))
+
+    assert [response_id(item) for item in responses] == [item["id"] for item in requests]
     assert responses[4]["error"]["code"] == "UNSUPPORTED_ACTION"
     assert responses[5]["error"]["code"] == "INPUT_NOT_FOUND"
-    assert responses[6]["status"] == responses[7]["status"] == "ok"
+    assert responses[6]["status"] == "success" and responses[7]["status"] == "ok"
     assert responses[8]["state"] == "shutting_down"
     for response in responses[1:4]:
         _check_outputs(response, "image")
@@ -121,7 +125,7 @@ def main() -> int:
             "type": "image",
             "path": str(image_path),
         })
-        assert response["status"] == "ok"
+        assert response["status"] == "success"
     with redirect_stdout(sys.stderr):
         video_response = engine.handle_request({
             "id": "direct-video",
@@ -129,7 +133,7 @@ def main() -> int:
             "type": "video",
             "path": str(video_paths[0]),
         })
-    assert video_response["status"] == "ok"
+    assert video_response["status"] == "success"
     assert id(engine.detector.session) == detector_session_id
     assert id(engine.ocr.session) == ocr_session_id
     assert engine.image_processor.detector is engine.video_processor.detector is engine.detector
@@ -142,9 +146,9 @@ def main() -> int:
         print(f"Image request {index}: {elapsed:.2f} ms")
     print(f"Average after READY: {sum(image_times) / len(image_times):.2f} ms")
     print(f"Video request: {times_ms['007']:.2f} ms")
-    print(f"FIFO: {[item['id'] for item in responses]}")
-    print(f"Image count: {responses[1]['result']['count']}")
-    print(f"Video count: {responses[6]['result']['count']}")
+    print(f"FIFO: {[response_id(item) for item in responses]}")
+    print(f"Image count: {responses[1]['count']}")
+    print(f"Video count: {responses[6]['count']}")
     print("Detector sessions: 1; OCR sessions: 1; both unchanged across requests")
     print("Live JSON Lines, outputs, and model lifetime: OK")
     return 0

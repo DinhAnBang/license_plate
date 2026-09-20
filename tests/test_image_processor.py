@@ -54,11 +54,11 @@ def main() -> int:
 
     json_path = project_dir / "output" / "json" / f"{source_path.stem}.json"
     saved = json.loads(json_path.read_text(encoding="utf-8"))
-    assert saved["status"] == "ok" and saved["type"] == "image"
+    assert saved["status"] == "success" and saved["input_type"] == "image"
     assert saved["count"] == len(saved["plates"])
     for plate in saved["plates"]:
-        assert {"raw_text", "text", "ocr_conf"}.issubset(plate)
-        assert (project_dir / plate["crop"]).is_file()
+        assert {"plate_text", "detection_confidence", "ocr_confidence", "crop_path"} == set(plate)
+        assert Path(plate["crop_path"]).is_file()
     assert processor.ocr.session_creation_count == 1
     assert processor.ocr_calls == len(saved["plates"])
     print(f"JSON: PASS | OCR calls: {processor.ocr_calls} | OCR sessions: 1")

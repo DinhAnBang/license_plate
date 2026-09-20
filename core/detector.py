@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -12,6 +11,8 @@ from typing import Any, TypedDict
 import cv2
 import numpy as np
 import onnxruntime as ort
+
+from .config import DETECTOR_CONF_THRESHOLD, DETECTOR_NMS_IOU_THRESHOLD
 
 
 class Detection(TypedDict):
@@ -28,6 +29,12 @@ class Timing(TypedDict):
     total_ms: float
 
 
+class DetectionStats(TypedDict):
+    raw_detector_candidates: int
+    detections_after_threshold: int
+    detections_after_nms: int
+
+
 class DetectorError(RuntimeError):
     """Raised when the model or an inference result is not supported."""
 
@@ -42,16 +49,17 @@ class _LetterboxInfo:
 class PlateDetector:
     """Detect all license plates from an OpenCV BGR image using ONNX Runtime.
 
-    The inspected model has a single class and emits raw YOLO-style predictions
-    with shape ``[1, 5, 8400]``: center-x, center-y, width, height, confidence.
-    The session is created once in ``__init__`` and reused by every ``detect``.
+    Supported models emit raw YOLO-style predictions shaped
+    ``[1, 4 + classes, candidates]`` (or its transpose): center-x, center-y,
+    width, height, then one confidence score per class. The session is created
+    once in ``__init__`` and reused by every ``detect``.
     """
 
     def __init__(
         self,
         model_path: str | Path,
-        conf_threshold: float = 0.5,
-        iou_threshold: float = 0.45,
+        conf_threshold: float = DETECTOR_CONF_THRESHOLD,
+        iou_threshold: float = DETECTOR_NMS_IOU_THRESHOLD,
         providers: Sequence[str] | None = None,
     ) -> None:
         if not 0.0 <= conf_threshold <= 1.0:
@@ -128,14 +136,48 @@ class PlateDetector:
             for output in self._outputs
         ]
 
-    def detect(self, image: np.ndarray) -> list[Detection]:
+    def detect(
+        self,
+        image: np.ndarray,
+        *,
+        conf_threshold: float | None = None,
+    ) -> list[Detection]:
         """Return every valid plate detection in an OpenCV BGR image."""
 
-        detections, _ = self.detect_with_timing(image)
+        detections, _, _ = self._detect(image, conf_threshold=conf_threshold)
         return detections
 
-    def detect_with_timing(self, image: np.ndarray) -> tuple[list[Detection], Timing]:
+    def detect_with_timing(
+        self,
+        image: np.ndarray,
+        *,
+        conf_threshold: float | None = None,
+    ) -> tuple[list[Detection], Timing]:
         """Run detection and return detections plus stage timings in milliseconds."""
+
+        detections, timings, _ = self._detect(image, conf_threshold=conf_threshold)
+        return detections, timings
+
+    def detect_with_stats(
+        self,
+        image: np.ndarray,
+        *,
+        conf_threshold: float | None = None,
+    ) -> tuple[list[Detection], DetectionStats]:
+        """Run detection and expose development counters without changing output."""
+
+        detections, _, stats = self._detect(image, conf_threshold=conf_threshold)
+        return detections, stats
+
+    def _detect(
+        self,
+        image: np.ndarray,
+        *,
+        conf_threshold: float | None,
+    ) -> tuple[list[Detection], Timing, DetectionStats]:
+        threshold = self.conf_threshold if conf_threshold is None else float(conf_threshold)
+        if not 0.0 <= threshold <= 1.0:
+            raise ValueError("conf_threshold must be between 0.0 and 1.0")
 
         self._validate_image(image)
         total_start = time.perf_counter()
@@ -155,10 +197,11 @@ class PlateDetector:
         inference_ms = (time.perf_counter() - inference_start) * 1000.0
 
         postprocess_start = time.perf_counter()
-        detections = self._postprocess(
+        detections, stats = self._postprocess_with_stats(
             outputs,
             image_shape=image.shape,
             letterbox=letterbox,
+            conf_threshold=threshold,
         )
         postprocess_ms = (time.perf_counter() - postprocess_start) * 1000.0
         total_ms = (time.perf_counter() - total_start) * 1000.0
@@ -169,7 +212,7 @@ class PlateDetector:
             "postprocess_ms": postprocess_ms,
             "total_ms": total_ms,
         }
-        return detections, timings
+        return detections, timings, stats
 
     def _validate_input_metadata(self) -> tuple[int, int, bool]:
         if self._input_type != "tensor(float)":
@@ -281,13 +324,31 @@ class PlateDetector:
         outputs: Sequence[np.ndarray],
         image_shape: tuple[int, ...],
         letterbox: _LetterboxInfo,
+        conf_threshold: float | None = None,
     ) -> list[Detection]:
+        """Compatibility wrapper returning only detections."""
+
+        detections, _ = self._postprocess_with_stats(
+            outputs,
+            image_shape=image_shape,
+            letterbox=letterbox,
+            conf_threshold=self.conf_threshold if conf_threshold is None else conf_threshold,
+        )
+        return detections
+
+    def _postprocess_with_stats(
+        self,
+        outputs: Sequence[np.ndarray],
+        image_shape: tuple[int, ...],
+        letterbox: _LetterboxInfo,
+        conf_threshold: float,
+    ) -> tuple[list[Detection], DetectionStats]:
         if not outputs:
             raise DetectorError("Inference returned no output tensors.")
 
-        # The inspected output [1, 5, 8400] is the raw, pre-NMS format
-        # [batch, features, candidates]. It contains one class, so the five
-        # features are xywh plus confidence. Transpose to [candidates, 5].
+        # Raw Ultralytics detection output is [batch, 4 + classes, candidates]
+        # or its transpose. The smaller axis is the feature axis for normal
+        # detector exports (for example 5 features for one class and 6 for two).
         raw_output = np.asarray(outputs[0])
         if raw_output.ndim == 3:
             if raw_output.shape[0] != 1:
@@ -302,12 +363,12 @@ class PlateDetector:
                 f"name={self._outputs[0].name}, shape={list(raw_output.shape)}, "
                 f"dtype={raw_output.dtype}, sample values="
                 f"{raw_output.reshape(-1)[:10].tolist()}. "
-                "Expected [1, 5, N] or [1, N, 5]."
+                "Expected [1, 4 + classes, N] or [1, N, 4 + classes]."
             )
 
-        if raw_output.shape[0] == 5 and raw_output.shape[1] != 5:
+        if 5 <= raw_output.shape[0] <= 256 and raw_output.shape[0] < raw_output.shape[1]:
             predictions = raw_output.T
-        elif raw_output.shape[1] == 5:
+        elif 5 <= raw_output.shape[1] <= 256 and raw_output.shape[1] < raw_output.shape[0]:
             predictions = raw_output
         else:
             sample = raw_output.reshape(-1)[:10].tolist()
@@ -315,23 +376,27 @@ class PlateDetector:
                 "Unsupported detection output format. "
                 f"name={self._outputs[0].name}, shape={list(raw_output.shape)}, "
                 f"dtype={raw_output.dtype}, "
-                f"sample values={sample}. Expected five features (xywh + confidence)."
+                f"sample values={sample}. Expected 4 box features followed by one or more class scores."
             )
 
         predictions = np.asarray(predictions, dtype=np.float32)
+        raw_candidate_count = len(predictions)
         if predictions.size == 0:
-            return []
+            return [], self._detection_stats(0, 0, 0)
 
-        # This model's output already contains confidence probabilities for
-        # its single class; no argmax is used, so every candidate is retained.
-        scores = predictions[:, 4]
+        # Ultralytics exports one score per class after xywh. The public engine
+        # treats every supported class as a license plate, so retain the best
+        # class confidence while keeping the established output schema.
+        class_scores = predictions[:, 4:]
+        scores = np.max(class_scores, axis=1)
         valid = np.isfinite(predictions).all(axis=1)
-        valid &= scores >= self.conf_threshold
+        valid &= scores >= conf_threshold
+        threshold_count = int(np.count_nonzero(valid))
         if not np.any(valid):
-            return []
+            return [], self._detection_stats(raw_candidate_count, 0, 0)
 
         selected = predictions[valid]
-        selected_scores = selected[:, 4]
+        selected_scores = scores[valid]
         center_x = selected[:, 0]
         center_y = selected[:, 1]
         box_width = selected[:, 2]
@@ -354,7 +419,7 @@ class PlateDetector:
         boxes[:, [1, 3]] = np.clip(boxes[:, [1, 3]], 0, image_height)
         valid_boxes = (boxes[:, 2] > boxes[:, 0]) & (boxes[:, 3] > boxes[:, 1])
         if not np.any(valid_boxes):
-            return []
+            return [], self._detection_stats(raw_candidate_count, threshold_count, 0)
         boxes = boxes[valid_boxes]
         selected_scores = selected_scores[valid_boxes]
 
@@ -377,7 +442,19 @@ class PlateDetector:
                 }
             )
 
-        return detections
+        return detections, self._detection_stats(
+            raw_candidate_count,
+            threshold_count,
+            len(detections),
+        )
+
+    @staticmethod
+    def _detection_stats(raw: int, after_threshold: int, after_nms: int) -> DetectionStats:
+        return {
+            "raw_detector_candidates": int(raw),
+            "detections_after_threshold": int(after_threshold),
+            "detections_after_nms": int(after_nms),
+        }
 
     @staticmethod
     def _nms(boxes: np.ndarray, scores: np.ndarray, iou_threshold: float) -> list[int]:
