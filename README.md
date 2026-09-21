@@ -39,6 +39,8 @@ Use `python main.py --help` for all flags. `--device auto` is the default; `--de
 
 The JSON contains `status`, `input`, `summary`, `vehicles`, and `performance`. Each video vehicle has one `track_id`; each image vehicle has a `vehicle_index`. Every vehicle has vehicle metadata, a plate result, and compact OCR evidence. Plate fields include raw fused OCR, normalized text, corrected machine text, formatted display text when a supported family matches, confidence, status, layout, and best plate bbox/frame. Empty or uncertain OCR remains in the result with a status.
 
+Only final results with `plate.confidence >= 0.50` are included in `vehicles`. Format validation is reported through `plate.format_valid` and `plate.format_reason`, but does not remove a result from the JSON. Detection, tracking, crop retention, OCR, and video processing still use the full internal evidence before this final confidence filter.
+
 Video OCR runs on the retained Top-K crops after frame collection, at most K times per track. Image OCR uses one crop per resolved plate. The processing pipeline lives in `src/`. Older diagnostic CLIs and exporters live in `tools/diagnostics/` and run with `python -m tools.diagnostics.<module>` from the project root. The saved archives in `tools/diagnostics/archive/` are historical data.
 
 ## Known limitations

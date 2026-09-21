@@ -34,6 +34,8 @@ class FinalVehicleResult:
     fusion_method: str | None
     support_count: int
     ocr_candidate_count: int
+    format_valid: bool = False
+    format_reason: str | None = None
 
     def to_json(self, debug: bool = False) -> dict[str, Any]:
         vehicle: dict[str, Any] = {
@@ -52,6 +54,8 @@ class FinalVehicleResult:
             "text": self.plate_text,
             "formatted": self.plate_formatted,
             "format_family": self.plate_format_family,
+            "format_valid": self.format_valid,
+            "format_reason": self.format_reason,
             "confidence": round(self.ocr_confidence, 6),
             "plate_observations": self.plate_observation_count,
             "layout": self.plate_layout,
@@ -91,6 +95,10 @@ def finalize_vehicle(
         vehicle_class_name in {"car", "bus", "truck"}
         and postprocessed.format_family == "motorbike_common"
     )
+    format_valid = postprocessed.format_valid and not family_mismatch
+    format_reason = postprocessed.format_reason
+    if family_mismatch:
+        format_reason = "vehicle_plate_family_mismatch"
     if plate_observation_count <= 0:
         status = "no_plate"
         status_reason = None
@@ -134,6 +142,8 @@ def finalize_vehicle(
         fusion_method=fusion.method if fusion else None,
         support_count=fusion.support_count if fusion else int(bool(postprocessed.raw_text)),
         ocr_candidate_count=ocr_candidate_count,
+        format_valid=format_valid,
+        format_reason=format_reason,
     )
 
 

@@ -259,6 +259,12 @@ class ALPRPipeline:
                     "unknown_characters": list(normalized.unknown_characters),
                 }
             final_rows.append(row)
+        # Keep only results that meet the configured minimum OCR/fusion confidence.
+        # Format validation remains available in the JSON but does not filter rows.
+        final_rows = [
+            row for row in final_rows
+            if row["plate"]["confidence"] >= self.config.low_confidence_threshold
+        ]
         plate_calls = self.plate_detector.detect_call_count - plate_calls_before
         ocr_calls = self.ocr_engine.inference_count - ocr_calls_before
         ocr_ms = self.ocr_engine.timing_totals["total_ms_per_crop"] * self.ocr_engine.inference_count - ocr_ms_before
@@ -266,7 +272,7 @@ class ALPRPipeline:
             "status": "ok",
             "input": {"path": str(source), "type": "image", "width": frame_width, "height": frame_height},
             "summary": {
-                "vehicles": len(vehicles),
+                "vehicles": len(final_rows),
                 "vehicles_with_plate": sum(row["plate"]["plate_observations"] > 0 for row in final_rows),
                 "vehicles_with_ocr": sum(bool(row["plate"]["raw_text"]) for row in final_rows),
                 "successful_results": sum(row["plate"]["status"] == "ok" for row in final_rows),
@@ -479,6 +485,13 @@ class ALPRPipeline:
                     ],
                     "unknown_characters": list(processed.unknown_characters),
                 }
+        processed_track_count = len(rows)
+        # Keep only results that meet the configured minimum OCR/fusion confidence.
+        # Format validation remains available in the JSON but does not filter rows.
+        rows = [
+            row for row in rows
+            if row["plate"]["confidence"] >= self.config.low_confidence_threshold
+        ]
         plate_calls = self.plate_detector.detect_call_count - plate_calls_before
         ocr_calls = self.ocr_engine.inference_count - ocr_calls_before
         ocr_ms = self.ocr_engine.timing_totals["total_ms_per_crop"] * self.ocr_engine.inference_count - ocr_ms_before
@@ -506,7 +519,7 @@ class ALPRPipeline:
                 "ocr_ms_per_crop": round(ocr_ms / ocr_calls, 6) if ocr_calls else 0.0,
                 "ocr_inference_calls": ocr_calls,
                 "fusion_ms_per_track": round(fusion.total_ms_per_track, 6),
-                "postprocess_ms_per_track": _ms(postprocess_seconds, len(rows)),
+                "postprocess_ms_per_track": _ms(postprocess_seconds, processed_track_count),
                 "overall_fps": round(frame_count / elapsed, 6),
                 "elapsed_seconds": round(elapsed, 6),
                 "session_init_count": self.session_init_count,
