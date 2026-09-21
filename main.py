@@ -1,64 +1,74 @@
-"""JSON Lines stdin/stdout entry point for the persistent AI engine."""
+"""Run the complete ONNX ALPR pipeline for one image or video."""
 
 from __future__ import annotations
 
 import argparse
 import json
-import logging
 import sys
-from contextlib import redirect_stdout
+import traceback
 from pathlib import Path
-from typing import Any
 
-from engine import AIPlateEngine
-from engine.protocol import error_response
+from src.alpr_pipeline import ALPRPipeline, IMAGE_EXTENSIONS, VIDEO_EXTENSIONS
 
 
-def emit(value: dict[str, Any]) -> None:
-    sys.stdout.write(json.dumps(value, ensure_ascii=False, separators=(",", ":")) + "\n")
-    sys.stdout.flush()
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--input", type=Path, required=True, help="Image or video path")
+    parser.add_argument(
+        "--output",
+        type=Path,
+        help="Output JSON path (default: output/<input-stem>_<YYYYMMDD_HHMMSS>.json)",
+    )
+    parser.add_argument("--save-annotated", action="store_true", help="Write annotated image/video")
+    parser.add_argument("--save-topk-crops", action="store_true", help="Write retained plate crops")
+    parser.add_argument("--debug", action="store_true", help="Print diagnostics and add per-candidate evidence")
+    parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
+    return parser.parse_args(argv)
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description="Persistent license plate AI engine over JSON Lines.")
-    parser.add_argument("--detector-model", type=Path, default=Path("models/best.onnx"))
-    parser.add_argument("--ocr-model", type=Path, default=Path("models/OCR/microcharnet.onnx"))
-    parser.add_argument("--no-json-files", action="store_true", help="Return results in memory without saving JSON files.")
-    args = parser.parse_args()
-
-    logging.basicConfig(level=logging.INFO, stream=sys.stderr)
-    emit({"event": "starting"})
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    source = args.input
+    output = args.output
     try:
-        engine = AIPlateEngine(
-            detector_model=args.detector_model,
-            ocr_model=args.ocr_model,
-            write_json=not args.no_json_files,
+        if not source.is_file():
+            raise FileNotFoundError(f"Input file does not exist: {source}")
+        suffix = source.suffix.lower()
+        if suffix not in IMAGE_EXTENSIONS | VIDEO_EXTENSIONS:
+            raise ValueError(f"Unsupported input type: {suffix or '<none>'}")
+        pipeline = ALPRPipeline(device=args.device, debug=args.debug)
+        kwargs = {
+            "output": output,
+            "save_annotated": args.save_annotated,
+            "save_topk_crops": args.save_topk_crops,
+            "debug": args.debug,
+        }
+        if suffix in IMAGE_EXTENSIONS:
+            result = pipeline.process_image(source, **kwargs)
+        else:
+            result = pipeline.process_video(source, **kwargs)
+        summary = result["summary"]
+        print(f"Processed {result['input']['type']}: {source}")
+        print(
+            f"Vehicles={summary['vehicles']}, with_plate={summary['vehicles_with_plate']}, "
+            f"with_ocr={summary['vehicles_with_ocr']}, status_ok={summary['successful_results']}"
         )
-        with redirect_stdout(sys.stderr):
-            engine.startup()
-    except Exception as exc:
-        logging.exception("Engine startup failed")
-        emit({"event": "error", "error": {"code": "STARTUP_ERROR", "message": str(exc)[:300]}})
+        print(f"JSON: {result['output_path']}")
+        if "annotated_path" in result:
+            print(f"Annotated: {result['annotated_path']}")
+        return 0
+    except (FileNotFoundError, ValueError, RuntimeError, OSError, json.JSONDecodeError) as exc:
+        if args.debug:
+            traceback.print_exc()
+        else:
+            print(f"ALPR error: {exc}", file=sys.stderr)
         return 1
-
-    emit({"event": "ready"})
-    try:
-        for line in sys.stdin:
-            try:
-                request = json.loads(line)
-            except json.JSONDecodeError as exc:
-                response = error_response(None, "INVALID_REQUEST", f"Invalid JSON: {exc.msg}")
-            else:
-                with redirect_stdout(sys.stderr):
-                    response = engine.handle_request(request)
-            emit(response)
-            if engine.state == engine.SHUTTING_DOWN:
-                break
-    except KeyboardInterrupt:
-        pass
-    finally:
-        engine.shutdown()
-    return 0
+    except Exception as exc:  # ONNX/OpenCV errors should still be user readable
+        if args.debug:
+            traceback.print_exc()
+        else:
+            print(f"ALPR error: {exc}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

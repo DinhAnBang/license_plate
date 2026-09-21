@@ -1,1 +1,1 @@
-"""Development-only model inspection and conversion utilities."""
+"""Development utilities; production imports only src."""

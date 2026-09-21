@@ -1,45 +1,50 @@
-# License Plate AI Engine
+# ALPR core engine
 
-Run the persistent ONNX engine from the project root:
+This project detects vehicles and license plates in images and videos, reads plate characters with ONNX OCR, combines video observations, and suggests a conservative Vietnamese plate display format.
+
+## Models and installation
+
+The production pipeline loads these files once per `ALPRPipeline` instance:
+
+- `models/vehicle/yolo26n.onnx`
+- `models/plate/best.onnx`
+- `models/OCR/microcharnet.onnx`
+
+Use Python 3.12 or a compatible version. From the project root:
 
 ```powershell
 python -m pip install -r requirements.txt
-python main.py
 ```
 
-The engine loads `models/best.onnx` and `models/OCR/microcharnet.onnx` once, warms both sessions, then writes `{"event":"starting"}` and `{"event":"ready"}` as separate stdout lines. Send one JSON object per stdin line:
-
-```json
-{"id":"1","action":"ping"}
-{"id":"2","action":"process","type":"image","path":"input/images1.jpg"}
-{"id":"3","action":"process","type":"video","path":"input/video.mp4"}
-{"id":"4","action":"shutdown"}
-```
-
-Each request gets one JSON response line in arrival order. Progress and diagnostics go to stderr; stdout contains only JSON Lines. Image/video results are returned directly from memory. Engine artifacts use `output/requests/<request_id>/`: `annotated.jpg` or `annotated.mp4`, `crops/plate_001.jpg` or `crops/track_0001.jpg`, and `result.json` unless `--no-json-files` is set. The result dict includes `request_id`, and generated artifact paths use project-relative forward slashes. Request IDs must be 1–80 ASCII letters, digits, hyphens, or underscores. Reusing an ID clears only that ID's output directory before processing; a failed request's partial directory is removed. Different IDs never share output paths, even when source filenames match.
-
-To run the engine contract tests and real-model integration test:
+Model export and diagnostic scripts additionally use:
 
 ```powershell
-python -m tests.test_engine
-python -m tests.test_output_namespace
-python -m tests.test_engine_live
+python -m pip install -r requirements-dev.txt
 ```
 
-`tests/` contains development checks. `tools/inspect_model.py` and `tools/convert_pt_to_onnx.py` are development utilities; `.pt` conversion needs separate Torch/Ultralytics dependencies and is not used by the runtime.
+Production does not load `.pt` weights or import Ultralytics.
 
-## PyInstaller one-file build
-
-Build the console engine (stdin/stdout must remain available) from the project root:
+## Run
 
 ```powershell
-python -m PyInstaller --clean --noconfirm LicensePlateEngine.spec
+python main.py --input input/images1.jpg
+python main.py --input input/test1.jpg --save-annotated --debug
+python main.py --input input/video.mp4 --save-annotated --save-topk-crops
+python main.py --input input/video.mp4 --output output/my_result.json --device cpu
 ```
 
-The spec bundles only the two ONNX model resources. In source mode, resources and output use the project root. In one-file mode, models are read from PyInstaller's temporary resource root while persistent output is written beside the executable at `dist/output/requests/`.
+Use `python main.py --help` for all flags. `--device auto` is the default; `--device cuda` requires the CUDA ONNX Runtime provider. `--debug` prints OCR diagnostics and includes per-candidate evidence in JSON. By default the JSON is saved as `output/<input-stem>_<YYYYMMDD_HHMMSS>.json`; annotated media is optional and uses the same timestamped prefix. Passing `--output` explicitly keeps the requested JSON path and uses the input stem for the related annotated/crop artifacts.
 
-Run the real executable persistence test after rebuilding:
+## Output
 
-```powershell
-python -B -m tests.test_frozen_executable
-```
+The JSON contains `status`, `input`, `summary`, `vehicles`, and `performance`. Each video vehicle has one `track_id`; each image vehicle has a `vehicle_index`. Every vehicle has vehicle metadata, a plate result, and compact OCR evidence. Plate fields include raw fused OCR, normalized text, corrected machine text, formatted display text when a supported family matches, confidence, status, layout, and best plate bbox/frame. Empty or uncertain OCR remains in the result with a status.
+
+Video OCR runs on the retained Top-K crops after frame collection, at most K times per track. Image OCR uses one crop per resolved plate. The processing pipeline lives in `src/`. Older diagnostic CLIs and exporters live in `tools/diagnostics/` and run with `python -m tools.diagnostics.<module>` from the project root. The saved archives in `tools/diagnostics/archive/` are historical data.
+
+## Known limitations
+
+- OCR can emit duplicate characters on some crops. Format matching does not remove them arbitrarily.
+- When a car/bus/truck OCR string fits only the common motorcycle family, the final result keeps the raw text, suppresses display formatting, and reports low confidence. Vehicle classification can itself be wrong, so this is a warning rather than a rejection.
+- Common civilian car and motorcycle templates are suggestions; special plates can remain `unrecognized_format`.
+- A single image has no temporal consensus. OCR confidence should be interpreted accordingly.
+- An annotated video shows the plate detection available at each frame. The final fused text is in JSON after the video ends.
