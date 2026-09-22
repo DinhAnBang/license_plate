@@ -1,6 +1,6 @@
 """Stateful V3.2 plate ownership using relative geometry and history.
 
-V3.1 remains in :mod:`src.plate_ownership` for regression compatibility.
+V3.1 remains in diagnostics for regression comparison.
 This resolver consumes raw per-track plate candidates, resolves one frame at a
 time, and updates bounded history only from trusted ownership decisions.
 """
@@ -9,18 +9,20 @@ from __future__ import annotations
 
 import time
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from math import isfinite
 from typing import Iterable, Sequence
 
 import numpy as np
 
-from .plate_detector import TrackedPlateCandidate
-from .plate_ownership import (
-    _intersection_area,
+from .plate_types import TrackedPlateCandidate
+from .geometry import (
+    intersection_area as _intersection_area,
+    bbox_center,
     bbox_iou,
     intersection_over_plate_area,
     point_inside_bbox,
+    valid_bbox as _valid_bbox,
 )
 
 
@@ -157,15 +159,6 @@ class _CandidateState:
     conflict_group: int | None = None
     selected: bool = False
     history_updated: bool = False
-
-
-def _valid_bbox(bbox: BBox) -> bool:
-    return (
-        len(bbox) == 4
-        and all(isfinite(float(value)) for value in bbox)
-        and bbox[2] > bbox[0]
-        and bbox[3] > bbox[1]
-    )
 
 
 def compute_relative_geometry(
@@ -357,10 +350,7 @@ class TemporalPlateOwnershipResolver:
             _valid_bbox(candidate.plate_bbox)
             and _valid_bbox(candidate.vehicle_bbox)
             and point_inside_bbox(
-                (
-                    (candidate.plate_bbox[0] + candidate.plate_bbox[2]) / 2.0,
-                    (candidate.plate_bbox[1] + candidate.plate_bbox[3]) / 2.0,
-                ),
+                bbox_center(candidate.plate_bbox),
                 candidate.vehicle_bbox,
             )
         )

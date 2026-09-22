@@ -16,8 +16,10 @@ from src.plate_buffer import (
     PlateBufferConfig,
     PlateBufferManager,
 )
-from src.plate_detector import PlateDetector, TrackedPlateCandidate, detect_tracked_plates
-from src.plate_ownership import resolve_plate_ownership_detailed
+from src.plate_detector import PlateDetector
+from src.plate_stage import detect_tracked_plates
+from src.plate_types import TrackedPlateCandidate
+from .legacy_plate_ownership import resolve_plate_ownership_detailed
 from src.plate_ownership_temporal import (
     TemporalPlateOwnershipConfig,
     TemporalPlateOwnershipResolution,
@@ -29,18 +31,10 @@ from src.plate_quality import (
     crop_plate_from_frame,
     score_plate_quality,
 )
-from src.microcharnet_ocr import (
-    MicroCharNetOCR,
-    build_ocr_json,
-    run_ocr_on_topk,
-    write_ocr_json,
-)
-from src.ocr_fusion import (
-    OCRFusionConfig,
-    build_fused_json,
-    format_fusion_debug,
-    fuse_candidates,
-)
+from src.microcharnet_ocr import MicroCharNetOCR
+from src.ocr_stage import run_ocr_on_topk
+from src.ocr_serialization import build_ocr_json, write_ocr_json, build_fused_json, format_fusion_debug
+from src.ocr_fusion import OCRFusionConfig, fuse_candidates
 from src.tracking import ByteTracker, TrackedVehicle
 from src.vehicle_detector import VehicleDetector
 

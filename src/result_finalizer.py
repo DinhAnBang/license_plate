@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
 
 from .ocr_fusion import FusedOCRResult
 from .vn_plate_postprocessor import VietnamPlateResult
@@ -36,39 +35,6 @@ class FinalVehicleResult:
     ocr_candidate_count: int
     format_valid: bool = False
     format_reason: str | None = None
-
-    def to_json(self, debug: bool = False) -> dict[str, Any]:
-        vehicle: dict[str, Any] = {
-            "class_id": self.vehicle_class_id,
-            "class_name": self.vehicle_class_name,
-            "first_frame": self.first_frame,
-            "last_frame": self.last_frame,
-            "observations": self.vehicle_observation_count,
-        }
-        plate: dict[str, Any] = {
-            "status": self.status,
-            "status_reason": self.status_reason,
-            "postprocess_status": self.postprocess_status,
-            "raw_text": self.plate_text_raw,
-            "normalized_text": self.plate_text_normalized,
-            "text": self.plate_text,
-            "formatted": self.plate_formatted,
-            "format_family": self.plate_format_family,
-            "format_valid": self.format_valid,
-            "format_reason": self.format_reason,
-            "confidence": round(self.ocr_confidence, 6),
-            "plate_observations": self.plate_observation_count,
-            "layout": self.plate_layout,
-            "best_bbox_xyxy": list(self.best_plate_bbox) if self.best_plate_bbox else None,
-            "best_frame": self.best_plate_frame,
-        }
-        evidence: dict[str, Any] = {
-            "ocr_candidates": self.ocr_candidate_count,
-            "fusion_method": self.fusion_method,
-            "support_count": self.support_count,
-        }
-        return {self.identity_key: self.identity, "vehicle": vehicle, "plate": plate, "evidence": evidence}
-
 
 def finalize_vehicle(
     *,

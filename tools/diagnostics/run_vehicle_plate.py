@@ -11,26 +11,24 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from src.plate_detector import (
-    PlateDetector,
-    TrackedPlateCandidate,
+from src.plate_stage import (
     crop_vehicle_roi,
     detect_tracked_plates,
     local_bbox_to_global,
     select_best_plate,
 )
-from src.plate_ownership import resolve_plate_ownership_detailed
+from src.plate_detector import PlateDetector
+from src.plate_types import TrackedPlateCandidate
+from .legacy_plate_ownership import resolve_plate_ownership_detailed
 from src.plate_ownership_temporal import (
     TemporalPlateOwnershipConfig,
     TemporalPlateOwnershipResolver,
 )
 from src.plate_quality import crop_plate_from_frame, score_plate_quality
 from src.plate_buffer import BufferedPlateCandidate
-from src.microcharnet_ocr import (
-    MicroCharNetOCR,
-    run_ocr_on_image_candidates,
-    write_ocr_json,
-)
+from src.microcharnet_ocr import MicroCharNetOCR
+from src.ocr_stage import run_ocr_on_image_candidates
+from src.ocr_serialization import write_ocr_json
 from src.tracking import ByteTracker, TrackedVehicle
 from src.vehicle_detector import VehicleDetector
 

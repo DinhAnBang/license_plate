@@ -11,12 +11,7 @@ import cv2
 import numpy as np
 import onnxruntime as ort
 
-from .tracking.byte_tracker import TrackedVehicle
-
-
 PLATE_CLASSES = {0: "vuong", 1: "dai"}
-# Backward-compatible metadata alias used by early V3 diagnostics.
-PLATE_TYPES = PLATE_CLASSES
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,128 +25,12 @@ class PlateDetection:
 
 
 @dataclass(frozen=True, slots=True)
-class TrackedPlateCandidate:
-    """One best plate candidate with global vehicle and plate coordinates."""
-
-    frame_index: int
-    track_id: int
-    vehicle_class_id: int
-    vehicle_class_name: str
-    vehicle_confidence: float
-    vehicle_bbox: tuple[int, int, int, int]
-    plate_class_id: int
-    plate_class_name: str
-    plate_confidence: float
-    plate_bbox: tuple[int, int, int, int]
-
-
-# Keep the V3 import name working while exposing the explicit V3.1 concept.
-TrackedPlate = TrackedPlateCandidate
-
-
-@dataclass(frozen=True, slots=True)
 class _LetterboxInfo:
     scale: float
     pad_left: int
     pad_top: int
     original_width: int
     original_height: int
-
-
-def crop_vehicle_roi(
-    frame: np.ndarray,
-    bbox: tuple[int, int, int, int],
-) -> tuple[np.ndarray, tuple[int, int, int, int]] | None:
-    """Clamp a global vehicle bbox and return its non-empty frame ROI."""
-
-    if not isinstance(frame, np.ndarray) or frame.ndim != 3:
-        raise ValueError("frame must be an HxWxC NumPy array")
-    frame_height, frame_width = frame.shape[:2]
-    if frame_height <= 0 or frame_width <= 0:
-        return None
-
-    x1, y1, x2, y2 = (int(value) for value in bbox)
-    x1 = int(np.clip(x1, 0, frame_width))
-    y1 = int(np.clip(y1, 0, frame_height))
-    x2 = int(np.clip(x2, 0, frame_width))
-    y2 = int(np.clip(y2, 0, frame_height))
-    if x2 <= x1 or y2 <= y1:
-        return None
-
-    roi = frame[y1:y2, x1:x2]
-    if roi.size == 0:
-        return None
-    return roi, (x1, y1, x2, y2)
-
-
-def local_bbox_to_global(
-    local_bbox: tuple[int, int, int, int],
-    parent_bbox: tuple[int, int, int, int],
-    frame_width: int,
-    frame_height: int,
-) -> tuple[int, int, int, int]:
-    """Translate a vehicle-local plate bbox and clamp it to the full frame."""
-
-    if frame_width <= 0 or frame_height <= 0:
-        raise ValueError("frame dimensions must be greater than zero")
-    local_x1, local_y1, local_x2, local_y2 = local_bbox
-    parent_x1, parent_y1, _, _ = parent_bbox
-    global_x1 = int(np.clip(parent_x1 + local_x1, 0, frame_width - 1))
-    global_y1 = int(np.clip(parent_y1 + local_y1, 0, frame_height - 1))
-    global_x2 = int(np.clip(parent_x1 + local_x2, 0, frame_width))
-    global_y2 = int(np.clip(parent_y1 + local_y2, 0, frame_height))
-    return global_x1, global_y1, global_x2, global_y2
-
-
-def select_best_plate(
-    plates: Sequence[PlateDetection],
-) -> PlateDetection | None:
-    """Select only within the current frame; no temporal quality logic."""
-
-    return max(plates, key=lambda plate: plate.confidence, default=None)
-
-
-def detect_tracked_plates(
-    frame: np.ndarray,
-    tracks: Sequence[TrackedVehicle],
-    plate_detector: "PlateDetector",
-    frame_index: int,
-) -> list[TrackedPlateCandidate]:
-    """Detect one best plate for each valid confirmed track ROI."""
-
-    frame_height, frame_width = frame.shape[:2]
-    results: list[TrackedPlateCandidate] = []
-    for track in tracks:
-        cropped = crop_vehicle_roi(frame, track.bbox)
-        if cropped is None:
-            continue
-        vehicle_roi, vehicle_bbox = cropped
-        best_plate = select_best_plate(plate_detector.detect(vehicle_roi))
-        if best_plate is None:
-            continue
-        global_bbox = local_bbox_to_global(
-            best_plate.bbox,
-            vehicle_bbox,
-            frame_width,
-            frame_height,
-        )
-        if global_bbox[2] <= global_bbox[0] or global_bbox[3] <= global_bbox[1]:
-            continue
-        results.append(
-            TrackedPlateCandidate(
-                frame_index=frame_index,
-                track_id=track.track_id,
-                vehicle_class_id=track.class_id,
-                vehicle_class_name=track.class_name,
-                vehicle_confidence=track.confidence,
-                vehicle_bbox=vehicle_bbox,
-                plate_class_id=best_plate.class_id,
-                plate_class_name=best_plate.class_name,
-                plate_confidence=best_plate.confidence,
-                plate_bbox=global_bbox,
-            )
-        )
-    return results
 
 
 class PlateDetector:

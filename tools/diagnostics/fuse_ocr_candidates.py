@@ -6,12 +6,8 @@ import argparse
 import json
 from pathlib import Path
 
-from src.ocr_fusion import (
-    OCRFusionConfig,
-    build_fused_json,
-    format_fusion_debug,
-    fuse_candidates,
-)
+from src.ocr_fusion import OCRFusionConfig, fuse_candidates
+from src.ocr_serialization import build_fused_json, format_fusion_debug
 
 
 def parse_args() -> argparse.Namespace:
