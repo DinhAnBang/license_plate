@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from collections import defaultdict
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -12,7 +13,7 @@ import numpy as np
 
 from .ocr_fusion import FusedOCRResult, fuse_candidates
 from .ocr_stage import OCRPlateCandidate, run_ocr_on_topk
-from .pipeline_support import _debug_ocr, _draw_box, _ms, _write_json
+from .pipeline_support import _debug_ocr, _draw_box, _ms, _plate_display_label, _write_json
 from .plate_buffer import PlateBufferManager
 from .plate_ownership_temporal import TemporalPlateOwnershipResolver
 from .plate_quality import crop_plate_from_frame, score_plate_quality
@@ -21,6 +22,72 @@ from .result_finalizer import FinalResultCollector, finalize_vehicle
 from .result_serialization import serialize_vehicle_result
 from .vehicle_stage import create_video_tracker
 from .vn_plate_postprocessor import postprocess_vietnam_plate
+
+
+@dataclass(frozen=True, slots=True)
+class _VehicleOverlay:
+    bbox: tuple[int, int, int, int]
+    label: str
+
+
+@dataclass(frozen=True, slots=True)
+class _PlateOverlay:
+    bbox: tuple[int, int, int, int]
+    track_id: int
+
+
+@dataclass(frozen=True, slots=True)
+class _FrameOverlay:
+    vehicles: tuple[_VehicleOverlay, ...]
+    plates: tuple[_PlateOverlay, ...]
+
+
+def _write_labeled_video(
+    source: Path,
+    destination: Path,
+    fps: float,
+    size: tuple[int, int],
+    overlays: list[_FrameOverlay],
+    plate_labels: dict[int, str],
+) -> None:
+    """Render final OCR labels after the video-wide fusion is available."""
+
+    capture = cv2.VideoCapture(str(source))
+    if not capture.isOpened():
+        raise ValueError(f"Could not reopen video for annotation: {source}")
+    writer = cv2.VideoWriter(
+        str(destination), cv2.VideoWriter_fourcc(*"mp4v"), fps, size,
+    )
+    if not writer.isOpened():
+        capture.release()
+        raise OSError(f"Could not create annotated video: {destination}")
+
+    frame_index = 0
+    try:
+        while True:
+            success, frame = capture.read()
+            if not success:
+                break
+            if frame_index >= len(overlays):
+                raise RuntimeError("Video frame count changed during annotation")
+            overlay = overlays[frame_index]
+            for vehicle in overlay.vehicles:
+                _draw_box(frame, vehicle.bbox, vehicle.label, (0, 200, 0))
+            for plate in overlay.plates:
+                _draw_box(
+                    frame,
+                    plate.bbox,
+                    plate_labels.get(plate.track_id, "unreadable"),
+                    (0, 0, 255),
+                )
+            writer.write(frame)
+            frame_index += 1
+    finally:
+        capture.release()
+        writer.release()
+
+    if frame_index != len(overlays):
+        raise RuntimeError("Video frame count changed during annotation")
 
 
 def run_video(
@@ -52,12 +119,7 @@ def run_video(
     manager = PlateBufferManager(self.config.buffer)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     annotated_path = output_path.parent / f"{artifact_stem}_annotated.mp4"
-    writer = None
-    if save_annotated:
-        writer = cv2.VideoWriter(str(annotated_path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height))
-        if not writer.isOpened():
-            capture.release()
-            raise OSError(f"Could not create annotated video: {annotated_path}")
+    annotation_frames: list[_FrameOverlay] = []
 
     frame_count = 0
     vehicle_seconds = tracking_seconds = ownership_seconds = quality_seconds = buffer_seconds = 0.0
@@ -88,6 +150,22 @@ def run_video(
             stage = time.perf_counter()
             resolution = resolver.resolve(frame_index, raw_plates)
             ownership_seconds += time.perf_counter() - stage
+            if save_annotated:
+                annotation_frames.append(
+                    _FrameOverlay(
+                        vehicles=tuple(
+                            _VehicleOverlay(
+                                bbox=track.bbox,
+                                label=f"ID {track.track_id} {track.class_name}",
+                            )
+                            for track in tracks
+                        ),
+                        plates=tuple(
+                            _PlateOverlay(bbox=plate.plate_bbox, track_id=plate.track_id)
+                            for plate in resolution.candidates
+                        ),
+                    )
+                )
             for plate in resolution.candidates:
                 crop = crop_plate_from_frame(frame, plate.plate_bbox)
                 if crop is None:
@@ -108,19 +186,10 @@ def run_video(
             resolver.cleanup(
                 track.track_id for track in tracker.all_tracks if track.state.name != "REMOVED"
             )
-            if writer is not None:
-                annotated = frame.copy()
-                for track in tracks:
-                    _draw_box(annotated, track.bbox, f"ID {track.track_id} {track.class_name}", (0, 200, 0))
-                for plate in resolution.candidates:
-                    _draw_box(annotated, plate.plate_bbox, plate.plate_class_name, (0, 0, 255))
-                writer.write(annotated)
             if frame_count == 1 or frame_count % 30 == 0:
                 print(f"Processed {frame_count} video frames", flush=True)
     finally:
         capture.release()
-        if writer is not None:
-            writer.release()
     if frame_count == 0:
         raise ValueError(f"Video contains no decodable frames: {source}")
 
@@ -168,6 +237,10 @@ def run_video(
             low_confidence_threshold=self.config.low_confidence_threshold,
         ))
     rows = [serialize_vehicle_result(result) for result in final_results.results]
+    plate_labels = {
+        int(row["track_id"]): _plate_display_label(row["plate"])
+        for row in rows
+    }
     if detailed:
         for row in rows:
             track_id = row["track_id"]
@@ -191,6 +264,15 @@ def run_video(
                 ],
                 "unknown_characters": list(processed.unknown_characters),
             }
+    if save_annotated:
+        _write_labeled_video(
+            source,
+            annotated_path,
+            fps,
+            (width, height),
+            annotation_frames,
+            plate_labels,
+        )
     processed_track_count = len(rows)
     # Keep only results that meet the configured minimum OCR/fusion confidence.
     # Format validation remains available in the JSON but does not filter rows.
@@ -231,7 +313,7 @@ def run_video(
             "session_init_count": self.session_init_count,
         },
     }
-    if writer is not None:
+    if save_annotated:
         payload["annotated_path"] = str(annotated_path)
     _write_json(output_path, payload)
     payload["output_path"] = str(output_path)

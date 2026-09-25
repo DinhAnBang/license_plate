@@ -11,7 +11,7 @@ from .plate_quality import PlateQualityMetrics
 
 @dataclass(frozen=True, slots=True)
 class PlateBufferConfig:
-    top_k: int = 5
+    top_k: int = 4
     min_frame_gap: int = 2
     min_quality_score: float = 0.0
 

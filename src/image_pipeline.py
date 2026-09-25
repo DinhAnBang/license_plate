@@ -9,7 +9,7 @@ from typing import Any
 import cv2
 
 from .ocr_stage import run_ocr_on_image_candidates
-from .pipeline_support import _debug_ocr, _draw_box, _ms, _write_json
+from .pipeline_support import _debug_ocr, _draw_box, _ms, _plate_display_label, _write_json
 from .plate_buffer import BufferedPlateCandidate
 from .plate_ownership_temporal import TemporalPlateOwnershipResolver
 from .plate_quality import crop_plate_from_frame, score_plate_quality
@@ -73,8 +73,6 @@ def run_image(
         quality = score_plate_quality(crop, plate.plate_confidence, self.config.quality)
         quality_seconds += time.perf_counter() - stage
         image_candidates.append(buffered_plate_candidate(plate, crop, quality))
-        if annotated is not None:
-            _draw_box(annotated, plate.plate_bbox, plate.plate_class_name, (0, 0, 255))
         if save_topk_crops:
             crop_path = output_path.parent / f"{artifact_stem}_crops" / f"vehicle_{plate.track_id}.jpg"
             crop_path.parent.mkdir(parents=True, exist_ok=True)
@@ -117,6 +115,18 @@ def run_image(
                 "unknown_characters": list(normalized.unknown_characters),
             }
         final_rows.append(row)
+    if annotated is not None:
+        plate_labels = {
+            int(row["vehicle_index"]): _plate_display_label(row["plate"])
+            for row in final_rows
+        }
+        for plate in resolution.candidates:
+            _draw_box(
+                annotated,
+                plate.plate_bbox,
+                plate_labels.get(plate.track_id, "unreadable"),
+                (0, 0, 255),
+            )
     # Keep only results that meet the configured minimum OCR/fusion confidence.
     # Format validation remains available in the JSON but does not filter rows.
     final_rows = [

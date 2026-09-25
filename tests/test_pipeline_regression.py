@@ -3,6 +3,8 @@
 import cv2
 import numpy as np
 
+import src.image_pipeline as image_pipeline
+import src.video_pipeline as video_pipeline
 from src.alpr_pipeline import ALPRPipeline
 from src.microcharnet_ocr import OCRResult
 from src.plate_detector import PlateDetection
@@ -48,9 +50,17 @@ def make_pipeline():
     )
 
 
-def test_image_pipeline_json_contract(tmp_path):
+def test_image_pipeline_json_contract(tmp_path, monkeypatch):
     source = tmp_path / "image.jpg"
     cv2.imwrite(str(source), np.full((100, 120, 3), 180, dtype=np.uint8))
+    drawn_labels = []
+    draw_box = image_pipeline._draw_box
+
+    def capture_draw(frame, bbox, label, color):
+        drawn_labels.append((label, color))
+        draw_box(frame, bbox, label, color)
+
+    monkeypatch.setattr(image_pipeline, "_draw_box", capture_draw)
     result = make_pipeline().process_image(source, output=tmp_path / "result.json", save_annotated=True)
     assert result["summary"] == {
         "vehicles": 1, "vehicles_with_plate": 1,
@@ -60,9 +70,11 @@ def test_image_pipeline_json_contract(tmp_path):
     assert result["vehicles"][0]["plate"]["formatted"] == "51A-123.45"
     assert (tmp_path / "result.json").is_file()
     assert (tmp_path / "image_annotated.jpg").is_file()
+    assert ("51A-123.45", (0, 0, 255)) in drawn_labels
+    assert not any(label == "dai" for label, _ in drawn_labels)
 
 
-def test_video_pipeline_json_contract(tmp_path):
+def test_video_pipeline_json_contract(tmp_path, monkeypatch):
     source = tmp_path / "video.mp4"
     writer = cv2.VideoWriter(str(source), cv2.VideoWriter_fourcc(*"mp4v"), 30.0, (120, 100))
     assert writer.isOpened()
@@ -70,6 +82,14 @@ def test_video_pipeline_json_contract(tmp_path):
         writer.write(np.full((100, 120, 3), 180, dtype=np.uint8))
     writer.release()
 
+    drawn_labels = []
+    draw_box = video_pipeline._draw_box
+
+    def capture_draw(frame, bbox, label, color):
+        drawn_labels.append((label, color))
+        draw_box(frame, bbox, label, color)
+
+    monkeypatch.setattr(video_pipeline, "_draw_box", capture_draw)
     model = make_pipeline()
     result = model.process_video(source, output=tmp_path / "result.json", save_annotated=True)
     assert result["input"]["frames"] == 5
@@ -80,3 +100,5 @@ def test_video_pipeline_json_contract(tmp_path):
     assert model.plate_detector.detect_call_count == 4
     assert (tmp_path / "result.json").is_file()
     assert (tmp_path / "video_annotated.mp4").is_file()
+    assert ("51A-123.45", (0, 0, 255)) in drawn_labels
+    assert not any(label == "dai" for label, _ in drawn_labels)

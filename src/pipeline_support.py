@@ -27,6 +27,16 @@ def _draw_box(frame: np.ndarray, bbox: tuple[int, int, int, int], label: str, co
     cv2.putText(frame, label, (max(0, x1), max(15, y1 - 5)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2, cv2.LINE_AA)
 
 
+def _plate_display_label(plate: dict[str, Any]) -> str:
+    """Return recognized plate text for annotations, with a clear empty fallback."""
+
+    for key in ("formatted", "text", "normalized_text", "raw_text"):
+        value = plate.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return "unreadable"
+
+
 def _debug_ocr(candidate: OCRPlateCandidate) -> dict[str, Any]:
     return {
         "rank": candidate.rank,
