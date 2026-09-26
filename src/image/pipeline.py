@@ -8,17 +8,20 @@ from typing import Any
 
 import cv2
 
-from .ocr_stage import run_ocr_on_image_candidates
-from .pipeline_support import _debug_ocr, _draw_box, _ms, _plate_display_label, _write_json
-from .plate_buffer import BufferedPlateCandidate
-from .plate_ownership_temporal import TemporalPlateOwnershipResolver
-from .plate_quality import crop_plate_from_frame, score_plate_quality
-from .plate_stage import buffered_plate_candidate, detect_vehicle_plate
-from .plate_types import TrackedPlateCandidate
-from .result_finalizer import finalize_vehicle
-from .result_serialization import serialize_vehicle_result
-from .vn_plate_postprocessor import postprocess_vietnam_plate
-from .vehicle_stage import detect_image_vehicles
+from ..ocr_stage import run_ocr_on_image_candidates
+from ..pipeline_support import _debug_ocr, _draw_box, _ms, _plate_display_label, _write_json
+from ..plate_buffer import BufferedPlateCandidate
+from ..plate_ownership_temporal import TemporalPlateOwnershipResolver
+from ..plate_quality import crop_plate_from_frame, score_plate_quality
+from ..plate_stage import buffered_plate_candidate, detect_vehicle_plates
+from ..plate_types import TrackedPlateCandidate
+from ..result_finalizer import finalize_vehicle
+from ..result_serialization import serialize_vehicle_result
+from ..vn_plate_postprocessor import (
+    postprocess_vietnam_plate,
+    preferred_family_for_vehicle_class,
+)
+from ..vehicle_stage import detect_image_vehicles
 
 
 def run_image(
@@ -55,9 +58,11 @@ def run_image(
     for vehicle_index, vehicle in enumerate(vehicles):
         if annotated is not None:
             _draw_box(annotated, vehicle.bbox, f"{vehicle_index} {vehicle.class_name}", (0, 200, 0))
-        plate = detect_vehicle_plate(image, vehicle, vehicle_index, self.plate_detector, 0)
-        if plate is not None:
-            raw.append(plate)
+        raw.extend(
+            detect_vehicle_plates(
+                image, vehicle, vehicle_index, self.plate_detector, 0,
+            )
+        )
     owner = TemporalPlateOwnershipResolver(self.config.ownership)
     stage = time.perf_counter()
     resolution = owner.resolve(0, raw)
@@ -74,7 +79,7 @@ def run_image(
         quality_seconds += time.perf_counter() - stage
         image_candidates.append(buffered_plate_candidate(plate, crop, quality))
         if save_topk_crops:
-            crop_path = output_path.parent / f"{artifact_stem}_crops" / f"vehicle_{plate.track_id}.jpg"
+            crop_path = output_path.parent / "crops" / f"vehicle_{plate.track_id}.jpg"
             crop_path.parent.mkdir(parents=True, exist_ok=True)
             if not cv2.imwrite(str(crop_path), crop):
                 raise OSError(f"Could not write crop: {crop_path}")
@@ -88,7 +93,13 @@ def run_image(
         raw_text = ocr.raw_text if ocr else ""
         confidence = ocr.ocr_confidence if ocr else 0.0
         stage = time.perf_counter()
-        normalized = postprocess_vietnam_plate(raw_text, confidence, self.config.vietnam)
+        normalized = postprocess_vietnam_plate(
+            raw_text,
+            confidence,
+            self.config.vietnam,
+            char_confidences=ocr.char_confidences if ocr else None,
+            preferred_family=preferred_family_for_vehicle_class(vehicle.class_name),
+        )
         postprocess_seconds += time.perf_counter() - stage
         final = finalize_vehicle(
             identity_key="vehicle_index", identity=index,
@@ -127,12 +138,6 @@ def run_image(
                 plate_labels.get(plate.track_id, "unreadable"),
                 (0, 0, 255),
             )
-    # Keep only results that meet the configured minimum OCR/fusion confidence.
-    # Format validation remains available in the JSON but does not filter rows.
-    final_rows = [
-        row for row in final_rows
-        if row["plate"]["confidence"] >= self.config.low_confidence_threshold
-    ]
     plate_calls = self.plate_detector.detect_call_count - plate_calls_before
     ocr_calls = self.ocr_engine.inference_count - ocr_calls_before
     ocr_ms = self.ocr_engine.timing_totals["total_ms_per_crop"] * self.ocr_engine.inference_count - ocr_ms_before
@@ -140,6 +145,7 @@ def run_image(
         "status": "ok",
         "input": {"path": str(source), "type": "image", "width": frame_width, "height": frame_height},
         "summary": {
+            "detected_vehicles": len(vehicles),
             "vehicles": len(final_rows),
             "vehicles_with_plate": sum(row["plate"]["plate_observations"] > 0 for row in final_rows),
             "vehicles_with_ocr": sum(bool(row["plate"]["raw_text"]) for row in final_rows),

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from math import isfinite
 
@@ -41,10 +42,16 @@ _TEMPLATES: tuple[tuple[str, str], ...] = (
 class VietnamPostprocessConfig:
     separators: str = " -."
     max_position_corrections: int = 2
+    extra_character_max_confidence: float = 0.50
+    extra_character_confidence_ratio: float = 0.75
 
     def __post_init__(self) -> None:
         if self.max_position_corrections < 0:
             raise ValueError("max_position_corrections must be nonnegative")
+        if not 0.0 <= self.extra_character_max_confidence <= 1.0:
+            raise ValueError("extra_character_max_confidence must be in [0, 1]")
+        if not 0.0 <= self.extra_character_confidence_ratio <= 1.0:
+            raise ValueError("extra_character_confidence_ratio must be in [0, 1]")
         if any(char.isalnum() for char in self.separators):
             raise ValueError("separators cannot contain letters or digits")
 
@@ -71,6 +78,23 @@ class VietnamPlateResult:
     unknown_characters: tuple[tuple[int, str], ...] = ()
     format_valid: bool = False
     format_reason: str | None = None
+
+
+def preferred_family_for_vehicle_class(vehicle_class_name: str) -> str | None:
+    """Return a format preference from the detector's vehicle class.
+
+    The OCR text alone cannot distinguish some valid seven/eight-character
+    layouts.  The vehicle detector already gives us useful context, so use it
+    only as a tie-breaker; it never makes an invalid OCR string valid.
+    """
+
+    if not isinstance(vehicle_class_name, str):
+        raise TypeError("vehicle_class_name must be str")
+    if vehicle_class_name == "motorcycle":
+        return "motorbike_common"
+    if vehicle_class_name in {"car", "bus", "truck"}:
+        return "car_common"
+    return None
 
 
 def _validate_common_format(text: str, family: str) -> tuple[bool, str | None]:
@@ -132,6 +156,8 @@ def postprocess_vietnam_plate(
     raw_text: str,
     fusion_confidence: float = 0.0,
     config: VietnamPostprocessConfig | None = None,
+    char_confidences: Sequence[float] | None = None,
+    preferred_family: str | None = None,
 ) -> VietnamPlateResult:
     """Suggest a known family using only position compatible OCR confusions.
 
@@ -143,6 +169,15 @@ def postprocess_vietnam_plate(
         raise TypeError("raw_text must be str")
     if not isfinite(fusion_confidence) or not 0.0 <= fusion_confidence <= 1.0:
         raise ValueError("fusion_confidence must be finite and in [0, 1]")
+    if char_confidences is not None and any(
+        not isfinite(float(value)) or not 0.0 <= float(value) <= 1.0
+        for value in char_confidences
+    ):
+        raise ValueError("char_confidences must contain values in [0, 1]")
+    if preferred_family not in {None, "car_common", "motorbike_common"}:
+        raise ValueError(
+            "preferred_family must be None, car_common, or motorbike_common"
+        )
     config = config or VietnamPostprocessConfig()
     stripped = raw_text.strip()
     normalized = "".join(
@@ -178,28 +213,58 @@ def postprocess_vietnam_plate(
     if not normalized:
         return result("no_text", "", format_reason="empty_text")
 
-    options: list[tuple[int, int, str, str, tuple[PlateCorrection, ...]]] = []
-    rejected_reasons: list[str] = []
-    for family_priority, (family, pattern) in enumerate(_TEMPLATES):
-        if len(normalized) != len(pattern):
-            continue
-        corrected: list[str] = []
-        changes: list[PlateCorrection] = []
-        for index, (char, expectation) in enumerate(zip(normalized, pattern)):
-            option = _expect(char, expectation)
-            if option is None:
-                break
-            replacement, reason = option
-            corrected.append(replacement)
-            if reason is not None:
-                changes.append(PlateCorrection(index, char, replacement, reason))
-        else:
-            candidate = "".join(corrected)
-            valid, reason = _validate_common_format(candidate, family)
-            if valid:
-                options.append((len(changes), family_priority, family, candidate, tuple(changes)))
-            elif reason is not None:
-                rejected_reasons.append(reason)
+    def find_options(
+        candidate_text: str,
+        prefix_changes: tuple[PlateCorrection, ...] = (),
+    ) -> tuple[
+        list[tuple[int, int, str, str, tuple[PlateCorrection, ...]]],
+        list[str],
+    ]:
+        options: list[tuple[int, int, str, str, tuple[PlateCorrection, ...]]] = []
+        rejected_reasons: list[str] = []
+        for family_priority, (family, pattern) in enumerate(_TEMPLATES):
+            if len(candidate_text) != len(pattern):
+                continue
+            corrected: list[str] = []
+            changes: list[PlateCorrection] = list(prefix_changes)
+            for index, (char, expectation) in enumerate(zip(candidate_text, pattern)):
+                option = _expect(char, expectation)
+                if option is None:
+                    break
+                replacement, reason = option
+                corrected.append(replacement)
+                if reason is not None:
+                    changes.append(PlateCorrection(index, char, replacement, reason))
+            else:
+                candidate = "".join(corrected)
+                valid, reason = _validate_common_format(candidate, family)
+                if valid:
+                    options.append((len(changes), family_priority, family, candidate, tuple(changes)))
+                elif reason is not None:
+                    rejected_reasons.append(reason)
+        return options, rejected_reasons
+
+    options, rejected_reasons = find_options(normalized)
+    if not options and char_confidences is not None:
+        confidences = tuple(float(value) for value in char_confidences)
+        if len(confidences) == len(normalized) and len(confidences) >= 1:
+            median_confidence = float(sorted(confidences)[len(confidences) // 2])
+            for index, confidence in enumerate(confidences):
+                is_low_confidence_outlier = (
+                    confidence <= config.extra_character_max_confidence
+                    and confidence <= median_confidence * config.extra_character_confidence_ratio
+                )
+                if not is_low_confidence_outlier:
+                    continue
+                candidate_text = normalized[:index] + normalized[index + 1:]
+                deletion = PlateCorrection(
+                    index, normalized[index], "", "low_confidence_extra_character",
+                )
+                deletion_options, deletion_reasons = find_options(
+                    candidate_text, (deletion,)
+                )
+                options.extend(deletion_options)
+                rejected_reasons.extend(deletion_reasons)
 
     if not options:
         return result(
@@ -207,7 +272,14 @@ def postprocess_vietnam_plate(
             normalized,
             format_reason=(rejected_reasons[0] if rejected_reasons else "invalid_length"),
         )
-    cost, _, family, corrected, changes = min(options, key=lambda item: (item[0], item[1]))
+    cost, _, family, corrected, changes = min(
+        options,
+        key=lambda item: (
+            item[0],
+            0 if preferred_family is None or item[2] == preferred_family else 1,
+            item[1],
+        ),
+    )
     if cost > config.max_position_corrections:
         return result(
             "low_format_confidence",
@@ -223,4 +295,10 @@ def postprocess_vietnam_plate(
     )
 
 
-__all__ = ["PlateCorrection", "VietnamPlateResult", "VietnamPostprocessConfig", "postprocess_vietnam_plate"]
+__all__ = [
+    "PlateCorrection",
+    "VietnamPlateResult",
+    "VietnamPostprocessConfig",
+    "postprocess_vietnam_plate",
+    "preferred_family_for_vehicle_class",
+]

@@ -24,6 +24,7 @@ from .geometry import (
     point_inside_bbox,
     valid_bbox as _valid_bbox,
 )
+from .tracking.matching import INF_COST, linear_assignment
 
 
 BBox = tuple[int, int, int, int]
@@ -291,15 +292,20 @@ class TemporalPlateOwnershipResolver:
             state.rejected_by_history for state in states
         )
 
-        selected: list[TrackedPlateCandidate] = []
+        # First cluster observations of the same physical plate.  Selection is
+        # then a one-to-one assignment between tracks and physical plates.  A
+        # same-track edge must not join two physical groups: doing that makes
+        # the transitive component swallow both nearby vehicles and retain
+        # only one plate for the whole frame.
+        group_by_state_id: dict[int, int] = {}
         for group_index, group in enumerate(groups):
             for state in group:
                 state.conflict_group = group_index if len(group) > 1 else None
+                group_by_state_id[id(state)] = group_index
             if len(group) == 1:
                 state = group[0]
                 state.tight_parent_score = 1.0
                 state.owner_score = self._owner_score(state)
-                owner = state
             else:
                 conflict_groups += 1
                 if self._group_is_definite_duplicate(group):
@@ -316,24 +322,56 @@ class TemporalPlateOwnershipResolver:
                         else 0.0
                     )
                     state.owner_score = self._owner_score(state)
-                owner = max(group, key=self._owner_key)
-                removed_candidates += len(group) - 1
-                if self._legacy_owner(group) != owner.candidate.track_id:
-                    changed_owner_groups += 1
-            owner.selected = True
-            selected.append(owner.candidate)
 
-            if len(group) == 1:
-                self._update_history(owner)
-                owner.history_updated = True
+        # Distinct physical groups offered to the same track are also a
+        # selection conflict, even though they must stay separate for the
+        # global one-to-one assignment above.
+        groups_by_track: dict[int, set[int]] = {}
+        for state in eligible_states:
+            groups_by_track.setdefault(state.candidate.track_id, set()).add(
+                group_by_state_id[id(state)]
+            )
+        same_track_conflicts = sum(
+            len(group_indexes) > 1
+            for group_indexes in groups_by_track.values()
+        )
+        conflict_groups += same_track_conflicts
+        ambiguous_groups += same_track_conflicts
+
+        selected_states = self._assign_tracks_to_plate_groups(groups)
+        selected_ids = {id(state) for state in selected_states}
+        removed_candidates = len(eligible_states) - len(selected_states)
+        for state in selected_states:
+            state.selected = True
+            group_index = group_by_state_id[id(state)]
+            group = groups[group_index]
+            if (
+                len(group) > 1
+                and self._legacy_owner(group) != state.candidate.track_id
+            ):
+                changed_owner_groups += 1
+
+            competitors = [
+                other
+                for other in eligible_states
+                if id(other) not in selected_ids
+                and (
+                    other.candidate.track_id == state.candidate.track_id
+                    or group_by_state_id[id(other)] == group_index
+                )
+            ]
+            margin = (
+                state.owner_score
+                - max(other.owner_score for other in competitors)
+                if competitors
+                else float("inf")
+            )
+            if margin >= self.config.min_history_update_margin:
+                self._update_history(state)
+                state.history_updated = True
                 history_updates += 1
-            else:
-                ordered = sorted(group, key=self._owner_key, reverse=True)
-                margin = ordered[0].owner_score - ordered[1].owner_score
-                if margin >= self.config.min_history_update_margin:
-                    self._update_history(owner)
-                    owner.history_updated = True
-                    history_updates += 1
+
+        selected = [state.candidate for state in selected_states]
 
         selected.sort(key=lambda candidate: candidate.track_id)
         elapsed_ms = (time.perf_counter() - started) * 1000.0
@@ -470,6 +508,8 @@ class TemporalPlateOwnershipResolver:
     def _conflict_groups(
         self, states: Sequence[_CandidateState]
     ) -> list[list[_CandidateState]]:
+        """Cluster observations that refer to the same physical plate."""
+
         parents = list(range(len(states)))
 
         def find(index: int) -> int:
@@ -518,6 +558,38 @@ class TemporalPlateOwnershipResolver:
         for index, state in enumerate(states):
             groups.setdefault(find(index), []).append(state)
         return [groups[root] for root in sorted(groups)]
+
+    def _assign_tracks_to_plate_groups(
+        self, groups: Sequence[Sequence[_CandidateState]]
+    ) -> list[_CandidateState]:
+        """Return the best one-to-one track/physical-plate assignment."""
+
+        track_ids = sorted(
+            {state.candidate.track_id for group in groups for state in group}
+        )
+        if not track_ids or not groups:
+            return []
+
+        track_index = {
+            track_id: index for index, track_id in enumerate(track_ids)
+        }
+        best_edges: dict[tuple[int, int], _CandidateState] = {}
+        for group_index, group in enumerate(groups):
+            for state in group:
+                edge = (track_index[state.candidate.track_id], group_index)
+                previous = best_edges.get(edge)
+                if previous is None or self._owner_key(state) > self._owner_key(
+                    previous
+                ):
+                    best_edges[edge] = state
+
+        costs = np.full(
+            (len(track_ids), len(groups)), INF_COST, dtype=np.float64
+        )
+        for edge, state in best_edges.items():
+            costs[edge] = 1.0 - state.owner_score
+        matches, _, _ = linear_assignment(costs, cost_limit=1.0)
+        return [best_edges[(row, column)] for row, column in matches]
 
     def _group_is_definite_duplicate(self, group: Sequence[_CandidateState]) -> bool:
         for first in range(len(group)):

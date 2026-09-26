@@ -68,33 +68,57 @@ def detect_vehicle_plate(
     plate_detector: PlateDetector,
     frame_index: int,
 ) -> TrackedPlateCandidate | None:
-    """Adapt one image detection or video track to one global plate candidate."""
+    """Compatibility adapter returning only the highest-confidence candidate.
+
+    Production orchestration uses :func:`detect_vehicle_plates` so ownership
+    can score every post-NMS detector candidate before selecting an owner.
+    """
+
+    return max(
+        detect_vehicle_plates(
+            frame, vehicle, identity, plate_detector, frame_index,
+        ),
+        key=lambda candidate: candidate.plate_confidence,
+        default=None,
+    )
+
+
+def detect_vehicle_plates(
+    frame: np.ndarray,
+    vehicle: VehicleDetection | TrackedVehicle,
+    identity: int,
+    plate_detector: PlateDetector,
+    frame_index: int,
+) -> list[TrackedPlateCandidate]:
+    """Adapt all post-NMS plate detections to global-frame candidates."""
 
     frame_height, frame_width = frame.shape[:2]
     cropped = crop_vehicle_roi(frame, vehicle.bbox)
     if cropped is None:
-        return None
+        return []
     vehicle_roi, vehicle_bbox = cropped
-    best_plate = select_best_plate(plate_detector.detect(vehicle_roi))
-    if best_plate is None:
-        return None
-    global_bbox = local_bbox_to_global(
-        best_plate.bbox, vehicle_bbox, frame_width, frame_height,
-    )
-    if global_bbox[2] <= global_bbox[0] or global_bbox[3] <= global_bbox[1]:
-        return None
-    return TrackedPlateCandidate(
-        frame_index=frame_index,
-        track_id=identity,
-        vehicle_class_id=vehicle.class_id,
-        vehicle_class_name=vehicle.class_name,
-        vehicle_confidence=vehicle.confidence,
-        vehicle_bbox=vehicle_bbox,
-        plate_class_id=best_plate.class_id,
-        plate_class_name=best_plate.class_name,
-        plate_confidence=best_plate.confidence,
-        plate_bbox=global_bbox,
-    )
+    results: list[TrackedPlateCandidate] = []
+    for plate in plate_detector.detect(vehicle_roi):
+        global_bbox = local_bbox_to_global(
+            plate.bbox, vehicle_bbox, frame_width, frame_height,
+        )
+        if global_bbox[2] <= global_bbox[0] or global_bbox[3] <= global_bbox[1]:
+            continue
+        results.append(
+            TrackedPlateCandidate(
+                frame_index=frame_index,
+                track_id=identity,
+                vehicle_class_id=vehicle.class_id,
+                vehicle_class_name=vehicle.class_name,
+                vehicle_confidence=vehicle.confidence,
+                vehicle_bbox=vehicle_bbox,
+                plate_class_id=plate.class_id,
+                plate_class_name=plate.class_name,
+                plate_confidence=plate.confidence,
+                plate_bbox=global_bbox,
+            )
+        )
+    return results
 
 
 def detect_tracked_plates(
@@ -103,15 +127,15 @@ def detect_tracked_plates(
     plate_detector: PlateDetector,
     frame_index: int,
 ) -> list[TrackedPlateCandidate]:
-    """Detect one best plate for each valid confirmed track ROI."""
+    """Detect all post-NMS plates for every valid confirmed track ROI."""
 
     results: list[TrackedPlateCandidate] = []
     for track in tracks:
-        candidate = detect_vehicle_plate(
-            frame, track, track.track_id, plate_detector, frame_index,
+        results.extend(
+            detect_vehicle_plates(
+                frame, track, track.track_id, plate_detector, frame_index,
+            )
         )
-        if candidate is not None:
-            results.append(candidate)
     return results
 
 

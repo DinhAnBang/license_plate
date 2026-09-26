@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -72,6 +73,16 @@ class TrackPlateSummary:
 @dataclass(slots=True)
 class _TrackState:
     retained: list[BufferedPlateCandidate] = field(default_factory=list)
+    selection_frontier: list[tuple[BufferedPlateCandidate, ...] | None] = field(
+        default_factory=list
+    )
+    eligible_frontier: list[tuple[BufferedPlateCandidate, ...] | None] = field(
+        default_factory=list
+    )
+    pending_frontiers: deque[
+        tuple[int, tuple[tuple[BufferedPlateCandidate, ...] | None, ...]]
+    ] = field(default_factory=deque)
+    last_candidate_frame: int | None = None
     vehicle_observations: int = 0
     plate_observations: int = 0
     valid_crops: int = 0
@@ -87,6 +98,9 @@ class PlateBufferManager:
 
     With ``min_frame_gap=2``, candidates one frame apart conflict because their
     absolute difference is less than 2; candidates two frames apart may coexist.
+    Valid crops for each track must be added in strictly increasing frame order,
+    matching the production video stream. The bounded selection frontier keeps
+    exact alternatives without retaining every crop from the video.
     """
 
     def __init__(self, config: PlateBufferConfig | None = None) -> None:
@@ -94,7 +108,18 @@ class PlateBufferManager:
         self._tracks: dict[int, _TrackState] = {}
 
     def _state(self, track_id: int) -> _TrackState:
-        return self._tracks.setdefault(int(track_id), _TrackState())
+        track_id = int(track_id)
+        state = self._tracks.get(track_id)
+        if state is None:
+            empty_frontier: list[
+                tuple[BufferedPlateCandidate, ...] | None
+            ] = [()] + [None] * self.config.top_k
+            state = _TrackState(
+                selection_frontier=list(empty_frontier),
+                eligible_frontier=list(empty_frontier),
+            )
+            self._tracks[track_id] = state
+        return state
 
     @staticmethod
     def _rank(candidate: BufferedPlateCandidate) -> tuple[float, float, float, int]:
@@ -104,6 +129,69 @@ class PlateBufferManager:
             candidate.quality.sharpness_raw,
             -candidate.frame_index,
         )
+
+    @classmethod
+    def _selection_key(
+        cls, selection: tuple[BufferedPlateCandidate, ...]
+    ) -> tuple[tuple[float, float, float, int], ...]:
+        """Rank a feasible set by its strongest evidence first."""
+
+        return tuple(
+            sorted((cls._rank(item) for item in selection), reverse=True)
+        )
+
+    @classmethod
+    def _better_selection(
+        cls,
+        first: tuple[BufferedPlateCandidate, ...] | None,
+        second: tuple[BufferedPlateCandidate, ...] | None,
+    ) -> tuple[BufferedPlateCandidate, ...] | None:
+        if first is None:
+            return second
+        if second is None:
+            return first
+        return (
+            first
+            if cls._selection_key(first) >= cls._selection_key(second)
+            else second
+        )
+
+    def _retain_candidate(
+        self, state: _TrackState, candidate: BufferedPlateCandidate
+    ) -> None:
+        """Update the exact bounded Top-K frontier for chronological input.
+
+        This is a cardinality-bounded weighted interval DP. It keeps enough
+        alternative states for a later high-quality crop to reveal an older,
+        compatible crop again, without retaining every crop from the video.
+        """
+
+        frame_index = candidate.frame_index
+        compatible_frame = frame_index - self.config.min_frame_gap
+        while (
+            state.pending_frontiers
+            and state.pending_frontiers[0][0] <= compatible_frame
+        ):
+            _, frontier = state.pending_frontiers.popleft()
+            state.eligible_frontier = list(frontier)
+
+        next_frontier = list(state.selection_frontier)
+        for count in range(1, self.config.top_k + 1):
+            prefix = state.eligible_frontier[count - 1]
+            including = None if prefix is None else (*prefix, candidate)
+            next_frontier[count] = self._better_selection(
+                next_frontier[count], including,
+            )
+
+        state.selection_frontier = next_frontier
+        state.pending_frontiers.append(
+            (frame_index, tuple(next_frontier))
+        )
+        best = max(
+            (selection for selection in next_frontier if selection is not None),
+            key=self._selection_key,
+        )
+        state.retained = sorted(best, key=self._rank, reverse=True)
 
     @staticmethod
     def _record_plate_metadata(
@@ -135,9 +223,18 @@ class PlateBufferManager:
         state.invalid_crops += 1
 
     def add_plate(self, candidate: BufferedPlateCandidate) -> bool:
-        """Record a resolved event and return whether the new crop remains retained."""
+        """Record a chronological event and report if its crop is in Top-K."""
 
         state = self._state(candidate.track_id)
+        if (
+            state.last_candidate_frame is not None
+            and candidate.frame_index <= state.last_candidate_frame
+        ):
+            raise ValueError(
+                "plate candidates for one track must be added in strictly increasing "
+                "frame order"
+            )
+        state.last_candidate_frame = candidate.frame_index
         self._record_plate_metadata(state, candidate.frame_index, candidate.plate_class_name)
         state.valid_crops += 1
         state.layout_votes[candidate.plate_class_name] = (
@@ -160,25 +257,7 @@ class PlateBufferManager:
             crop=candidate.crop,
         )
 
-        conflicts = [
-            existing
-            for existing in state.retained
-            if abs(stored_candidate.frame_index - existing.frame_index)
-            < self.config.min_frame_gap
-        ]
-        if conflicts:
-            winner = max([stored_candidate, *conflicts], key=self._rank)
-            conflict_ids = {id(item) for item in conflicts}
-            state.retained = [
-                item for item in state.retained if id(item) not in conflict_ids
-            ]
-            state.retained.append(winner)
-        else:
-            state.retained.append(stored_candidate)
-
-        state.retained.sort(key=self._rank, reverse=True)
-        if len(state.retained) > self.config.top_k:
-            del state.retained[self.config.top_k :]
+        self._retain_candidate(state, stored_candidate)
         return any(item is stored_candidate for item in state.retained)
 
     def get_top_candidates(self, track_id: int) -> tuple[BufferedPlateCandidate, ...]:

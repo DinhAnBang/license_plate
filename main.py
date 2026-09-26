@@ -10,7 +10,11 @@ from datetime import datetime
 from pathlib import Path
 
 from src.alpr_pipeline import ALPRPipeline, IMAGE_EXTENSIONS, VIDEO_EXTENSIONS
-from src.customer_output import build_customer_payload, write_customer_json
+from src.customer_output import (
+    build_customer_payload,
+    write_customer_annotated_image,
+    write_customer_json,
+)
 from src.paths import application_directory
 
 
@@ -20,7 +24,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--output",
         type=Path,
-        help="Output JSON path (default: output/<input-stem>_<YYYYMMDD_HHMMSS>.json)",
+        help="Output JSON filename; CLI groups it under output/<filename-stem>/",
     )
     parser.add_argument("--save-annotated", action="store_true", help="Write annotated image/video")
     parser.add_argument("--save-topk-crops", action="store_true", help="Write retained plate crops")
@@ -46,6 +50,14 @@ def _release_paths(source: Path) -> tuple[Path, Path]:
     return output_directory, output_directory / f"{source.stem}.json"
 
 
+def _development_output_path(output: Path | None) -> Path | None:
+    """Keep one CLI input's JSON and media artifacts in one named bundle."""
+
+    if output is None or output.suffix.lower() != ".json":
+        return output
+    return output.parent / output.stem / output.name
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     source = args.input
@@ -67,9 +79,13 @@ def main(argv: list[str] | None = None) -> int:
         if release_mode:
             release_directory, output = _release_paths(source)
             release_directory.mkdir(parents=True, exist_ok=True)
+        else:
+            output = _development_output_path(output)
         kwargs = {
             "output": output,
-            "save_annotated": args.save_annotated or release_mode,
+            "save_annotated": (
+                args.save_annotated or release_mode
+            ) and not (release_mode and suffix in IMAGE_EXTENSIONS),
             "save_topk_crops": args.save_topk_crops and not release_mode,
             "debug": args.debug,
         }
@@ -79,7 +95,22 @@ def main(argv: list[str] | None = None) -> int:
             result = pipeline.process_video(source, **kwargs)
         if release_mode:
             assert release_directory is not None
-            write_customer_json(output, build_customer_payload(result))
+            if suffix in IMAGE_EXTENSIONS:
+                annotated_path = release_directory / f"{source.stem}_annotated.jpg"
+                write_customer_annotated_image(
+                    source,
+                    annotated_path,
+                    result,
+                    min_confidence=pipeline.config.low_confidence_threshold,
+                )
+                result["annotated_path"] = str(annotated_path)
+            write_customer_json(
+                output,
+                build_customer_payload(
+                    result,
+                    min_confidence=pipeline.config.low_confidence_threshold,
+                ),
+            )
         summary = result["summary"]
         print(f"Processed {result['input']['type']}: {source}")
         print(

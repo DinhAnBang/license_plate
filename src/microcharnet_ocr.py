@@ -233,11 +233,34 @@ def _group_and_sort_characters(
     heights = np.asarray(
         [max(1.0, item.bbox[3] - item.bbox[1]) for item in ordered], dtype=np.float32
     )
-    gaps = np.diff(centers_y)
-    split_index = int(np.argmax(gaps)) + 1
-    # A second line must be separated by more than 0.75 median character
-    # heights; this avoids splitting normal vertical jitter in a long plate.
-    if float(gaps[split_index - 1]) <= 0.75 * max(1.0, float(np.median(heights))):
+    median_height = max(1.0, float(np.median(heights)))
+
+    # The old rule compared the gap between rows with the full character
+    # height.  It missed this valid two-line crop because the glyph boxes are
+    # tall and slightly tilted: the row-center gap was just below that
+    # threshold even though each row was internally tight.  Compare the
+    # candidate row centers with their own robust vertical spread instead.
+    split_index: int | None = None
+    split_score = float("-inf")
+    for candidate_index in range(2, len(ordered) - 1):
+        upper = centers_y[:candidate_index]
+        lower = centers_y[candidate_index:]
+        upper_center = float(np.median(upper))
+        lower_center = float(np.median(lower))
+        center_gap = lower_center - upper_center
+        boundary_gap = float(centers_y[candidate_index] - centers_y[candidate_index - 1])
+        upper_spread = float(np.median(np.abs(upper - upper_center)))
+        lower_spread = float(np.median(np.abs(lower - lower_center)))
+        row_spread = max(1.0, upper_spread, lower_spread)
+        minimum_center_gap = max(0.35 * median_height, 2.0 * row_spread)
+        if center_gap < minimum_center_gap or boundary_gap < 0.25 * median_height:
+            continue
+        score = center_gap / row_spread
+        if score > split_score:
+            split_index = candidate_index
+            split_score = score
+
+    if split_index is None:
         groups = [ordered]
     else:
         groups = [ordered[:split_index], ordered[split_index:]]
@@ -430,7 +453,8 @@ class MicroCharNetOCR:
             "character_mapping_source": "ONNX metadata.names",
             "architecture": "Ultralytics Detect character detector",
             "output_semantics": (
-                "processed xyxy boxes, confidence, and class_id; no application NMS"
+                "processed xyxy boxes, confidence, and class_id; application "
+                "class-agnostic NMS removes duplicate glyph hypotheses"
                 if self.output_format is OutputFormat.END2END
                 else "decoded absolute xywh boxes plus sigmoid class probabilities; "
                 "raw detector fallback, not CTC"
@@ -590,7 +614,15 @@ class MicroCharNetOCR:
     def _decode_end2end(
         self, output: np.ndarray, transform: _Transform
     ) -> tuple[OCRResult, tuple[OCRCharacter, ...]]:
-        """Decode processed rows without applying application NMS."""
+        """Decode processed rows and suppress duplicate glyph hypotheses.
+
+        End-to-end detector exports may already contain graph-level NMS, but
+        that NMS can be class-aware.  A single physical glyph can therefore
+        survive as several classes at the same location (for example ``C``
+        and ``0``), which would manufacture extra characters in the assembled
+        plate.  Apply the same class-agnostic source-space NMS used by the raw
+        decoder before converting boxes to integer debug coordinates.
+        """
 
         output = np.asarray(output)
         if output.ndim != 3 or output.shape[0] != 1 or output.shape[2] != 6:
@@ -603,7 +635,7 @@ class MicroCharNetOCR:
                 "MicroCharNet end-to-end output contains non-finite values"
             )
 
-        characters: list[OCRCharacter] = []
+        candidates: list[_RawCharacter] = []
         for row in output[0].astype(np.float32, copy=False):
             x1, y1, x2, y2, confidence_raw, class_id_raw = [
                 float(value) for value in row
@@ -654,18 +686,33 @@ class MicroCharNetOCR:
                     )
                 ),
             )
-            integer_box = _as_int_bbox(
-                source_box, transform.source_width, transform.source_height
-            )
-            if integer_box is not None:
-                characters.append(
-                    OCRCharacter(
-                        char=self.class_names[class_id],
-                        class_id=class_id,
-                        confidence=confidence,
-                        bbox=integer_box,
-                    )
+            if source_box[2] <= source_box[0] or source_box[3] <= source_box[1]:
+                continue
+            candidates.append(
+                _RawCharacter(
+                    char=self.class_names[class_id],
+                    class_id=class_id,
+                    confidence=confidence,
+                    box=source_box,
                 )
+            )
+
+        kept = _class_agnostic_nms(candidates, self.iou_threshold)
+        characters: list[OCRCharacter] = []
+        for item in kept:
+            integer_box = _as_int_bbox(
+                item.box, transform.source_width, transform.source_height
+            )
+            if integer_box is None:
+                continue
+            characters.append(
+                OCRCharacter(
+                    char=item.char,
+                    class_id=item.class_id,
+                    confidence=item.confidence,
+                    bbox=integer_box,
+                )
+            )
         return self._build_result(characters, output.shape)
 
     def _decode_raw(

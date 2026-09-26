@@ -25,7 +25,7 @@ from .matching import (
     iou_matrix,
     linear_assignment,
 )
-from .track import TrackState, VehicleTrack
+from .track import TrackRemovalReason, TrackState, VehicleTrack
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,6 +182,21 @@ class ByteTracker:
     def all_tracks(self) -> tuple[VehicleTrack, ...]:
         return tuple(
             self._all_tracks[track_id] for track_id in sorted(self._all_tracks)
+        )
+
+    @property
+    def result_tracks(self) -> tuple[VehicleTrack, ...]:
+        """Confirmed physical vehicles eligible for final pipeline output.
+
+        Timed-out tracks represent vehicles that left the scene and remain
+        valid results. Only identities explicitly suppressed as duplicates
+        are excluded.
+        """
+
+        return tuple(
+            track
+            for track in self.all_tracks
+            if track.removal_reason is not TrackRemovalReason.DUPLICATE
         )
 
     @property
@@ -358,7 +373,9 @@ class ByteTracker:
 
         removed_tentative = 0
         for track_index in unmatched_tentative:
-            tentative_pool[track_index].mark_removed()
+            tentative_pool[track_index].mark_removed(
+                TrackRemovalReason.UNCONFIRMED
+            )
             removed_tentative += 1
 
         new_tracks = 0
@@ -389,7 +406,7 @@ class ByteTracker:
                 track.state is TrackState.LOST
                 and frame_index - track.last_frame > self.max_lost_frames
             ):
-                track.mark_removed()
+                track.mark_removed(TrackRemovalReason.TIMEOUT)
                 newly_removed += 1
 
         self.tracked_tracks = self._unique_tracks(
@@ -517,8 +534,8 @@ class ByteTracker:
         """
 
         similarities = iou_matrix(tracked_tracks, lost_tracks)
-        remove_tracked: set[int] = set()
-        remove_lost: set[int] = set()
+        remove_tracked: dict[int, VehicleTrack] = {}
+        remove_lost: dict[int, VehicleTrack] = {}
         for tracked_index, lost_index in np.argwhere(
             similarities >= self.duplicate_iou_threshold
         ):
@@ -527,22 +544,34 @@ class ByteTracker:
             tracked_rank = self._identity_rank(tracked)
             lost_rank = self._identity_rank(lost)
             if tracked_rank >= lost_rank:
-                remove_lost.add(int(lost_index))
+                index = int(lost_index)
+                keeper = remove_lost.get(index)
+                if keeper is None or tracked_rank > self._identity_rank(keeper):
+                    remove_lost[index] = tracked
             else:
-                remove_tracked.add(int(tracked_index))
+                index = int(tracked_index)
+                keeper = remove_tracked.get(index)
+                if keeper is None or lost_rank > self._identity_rank(keeper):
+                    remove_tracked[index] = lost
 
         duplicates: list[VehicleTrack] = []
         kept_tracked: list[VehicleTrack] = []
         for index, track in enumerate(tracked_tracks):
             if index in remove_tracked:
-                track.mark_removed()
+                track.mark_removed(
+                    TrackRemovalReason.DUPLICATE,
+                    duplicate_of_track_id=remove_tracked[index].track_id,
+                )
                 duplicates.append(track)
             else:
                 kept_tracked.append(track)
         kept_lost: list[VehicleTrack] = []
         for index, track in enumerate(lost_tracks):
             if index in remove_lost:
-                track.mark_removed()
+                track.mark_removed(
+                    TrackRemovalReason.DUPLICATE,
+                    duplicate_of_track_id=remove_lost[index].track_id,
+                )
                 duplicates.append(track)
             else:
                 kept_lost.append(track)
@@ -597,10 +626,13 @@ class ByteTracker:
                 continue
             if first.track_id in duplicate_ids or second.track_id in duplicate_ids:
                 continue
-            _keeper, duplicate = sorted(
+            keeper, duplicate = sorted(
                 (first, second), key=self._identity_rank, reverse=True
             )
-            duplicate.mark_removed()
+            duplicate.mark_removed(
+                TrackRemovalReason.DUPLICATE,
+                duplicate_of_track_id=keeper.track_id,
+            )
             duplicate_ids.add(duplicate.track_id)
             duplicate_tracks.append(duplicate)
 

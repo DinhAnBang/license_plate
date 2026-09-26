@@ -11,17 +11,20 @@ from typing import Any
 import cv2
 import numpy as np
 
-from .ocr_fusion import FusedOCRResult, fuse_candidates
-from .ocr_stage import OCRPlateCandidate, run_ocr_on_topk
-from .pipeline_support import _debug_ocr, _draw_box, _ms, _plate_display_label, _write_json
-from .plate_buffer import PlateBufferManager
-from .plate_ownership_temporal import TemporalPlateOwnershipResolver
-from .plate_quality import crop_plate_from_frame, score_plate_quality
-from .plate_stage import buffered_plate_candidate, detect_tracked_plates
-from .result_finalizer import FinalResultCollector, finalize_vehicle
-from .result_serialization import serialize_vehicle_result
-from .vehicle_stage import create_video_tracker
-from .vn_plate_postprocessor import postprocess_vietnam_plate
+from ..ocr_fusion import FusedOCRResult, fuse_candidates
+from ..ocr_stage import OCRPlateCandidate, run_ocr_on_topk
+from ..pipeline_support import _debug_ocr, _draw_box, _ms, _plate_display_label, _write_json
+from ..plate_buffer import PlateBufferManager
+from ..plate_ownership_temporal import TemporalPlateOwnershipResolver
+from ..plate_quality import crop_plate_from_frame, score_plate_quality
+from ..plate_stage import buffered_plate_candidate, detect_tracked_plates
+from ..result_finalizer import FinalResultCollector, finalize_vehicle
+from ..result_serialization import serialize_vehicle_result
+from ..vehicle_stage import create_video_tracker
+from ..vn_plate_postprocessor import (
+    postprocess_vietnam_plate,
+    preferred_family_for_vehicle_class,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -193,11 +196,13 @@ def run_video(
     if frame_count == 0:
         raise ValueError(f"Video contains no decodable frames: {source}")
 
+    result_tracks = tracker.result_tracks
+    result_track_ids = {track.track_id for track in result_tracks}
     summaries = manager.finalize_all()
     if save_topk_crops:
         for summary in summaries:
             for rank, candidate in enumerate(manager.get_top_candidates(summary.track_id), 1):
-                crop_path = output_path.parent / f"{artifact_stem}_topk" / f"track_{summary.track_id}" / f"rank_{rank}_frame_{candidate.frame_index}.jpg"
+                crop_path = output_path.parent / "topk" / f"track_{summary.track_id}" / f"rank_{rank}_frame_{candidate.frame_index}.jpg"
                 crop_path.parent.mkdir(parents=True, exist_ok=True)
                 if not cv2.imwrite(str(crop_path), candidate.crop):
                     raise OSError(f"Could not write crop: {crop_path}")
@@ -206,8 +211,12 @@ def run_video(
     for candidate in ocr_results:
         grouped_ocr[candidate.track_id].append(candidate)
     fusion = fuse_candidates(
-        ocr_results,
-        track_ids=(track.track_id for track in tracker.all_tracks),
+        (
+            candidate
+            for candidate in ocr_results
+            if candidate.track_id in result_track_ids
+        ),
+        track_ids=result_track_ids,
         config=self.config.fusion,
     )
     fused_by_track: dict[int, FusedOCRResult] = {result.track_id: result for result in fusion.results}
@@ -215,11 +224,16 @@ def run_video(
     postprocess_seconds = 0.0
     processed_by_track = {}
     final_results = FinalResultCollector()
-    for track in tracker.all_tracks:
+    for track in result_tracks:
         summary = summary_by_track[track.track_id]
         fused = fused_by_track[track.track_id]
         stage = time.perf_counter()
-        processed = postprocess_vietnam_plate(fused.raw_text, fused.confidence, self.config.vietnam)
+        processed = postprocess_vietnam_plate(
+            fused.raw_text,
+            fused.confidence,
+            self.config.vietnam,
+            preferred_family=preferred_family_for_vehicle_class(track.class_name),
+        )
         postprocess_seconds += time.perf_counter() - stage
         processed_by_track[track.track_id] = processed
         best = manager.get_top_candidates(track.track_id)
@@ -274,12 +288,6 @@ def run_video(
             plate_labels,
         )
     processed_track_count = len(rows)
-    # Keep only results that meet the configured minimum OCR/fusion confidence.
-    # Format validation remains available in the JSON but does not filter rows.
-    rows = [
-        row for row in rows
-        if row["plate"]["confidence"] >= self.config.low_confidence_threshold
-    ]
     plate_calls = self.plate_detector.detect_call_count - plate_calls_before
     ocr_calls = self.ocr_engine.inference_count - ocr_calls_before
     ocr_ms = self.ocr_engine.timing_totals["total_ms_per_crop"] * self.ocr_engine.inference_count - ocr_ms_before
@@ -289,6 +297,7 @@ def run_video(
         "input": {"path": str(source), "type": "video", "frames": frame_count,
                   "fps": round(fps, 6), "width": width, "height": height},
         "summary": {
+            "detected_vehicles": len(rows),
             "vehicles": len(rows),
             "vehicles_with_plate": sum(row["plate"]["plate_observations"] > 0 for row in rows),
             "vehicles_with_ocr": sum(bool(row["plate"]["raw_text"]) for row in rows),

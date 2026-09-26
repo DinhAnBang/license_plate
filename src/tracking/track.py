@@ -18,6 +18,14 @@ class TrackState(Enum):
     REMOVED = auto()
 
 
+class TrackRemovalReason(Enum):
+    """Why a track left live tracking state."""
+
+    UNCONFIRMED = auto()
+    TIMEOUT = auto()
+    DUPLICATE = auto()
+
+
 def xyxy_to_xyah(bbox: tuple[int, int, int, int] | np.ndarray) -> np.ndarray:
     """Convert ``(x1, y1, x2, y2)`` to ``(centre_x, centre_y, a, h)``."""
 
@@ -94,6 +102,8 @@ class VehicleTrack:
         self.lost_frames = 0
         self.is_activated = False
         self.was_confirmed = False
+        self.removal_reason: TrackRemovalReason | None = None
+        self.duplicate_of_track_id: int | None = None
 
     @property
     def bbox(self) -> np.ndarray:
@@ -191,9 +201,27 @@ class VehicleTrack:
             self.state = TrackState.LOST
             self.lost_frames = max(1, frame_index - self.last_frame)
 
-    def mark_removed(self) -> None:
+    def mark_removed(
+        self,
+        reason: TrackRemovalReason,
+        *,
+        duplicate_of_track_id: int | None = None,
+    ) -> None:
+        if reason is TrackRemovalReason.DUPLICATE:
+            if duplicate_of_track_id is None or duplicate_of_track_id <= 0:
+                raise ValueError(
+                    "A duplicate removal requires a positive canonical track ID"
+                )
+            if duplicate_of_track_id == self.track_id:
+                raise ValueError("A track cannot be a duplicate of itself")
+        elif duplicate_of_track_id is not None:
+            raise ValueError(
+                "duplicate_of_track_id is only valid for duplicate removal"
+            )
         self.state = TrackState.REMOVED
         self.is_activated = False
+        self.removal_reason = reason
+        self.duplicate_of_track_id = duplicate_of_track_id
 
     def _add_class_evidence(
         self, detection: VehicleDetection, frame_index: int

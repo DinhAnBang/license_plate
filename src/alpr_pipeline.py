@@ -2,19 +2,18 @@
 
 from __future__ import annotations
 
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import onnxruntime as ort
 
 from .config import PipelineConfig
-from .image_pipeline import run_image
+from .image.pipeline import run_image
 from .microcharnet_ocr import MicroCharNetOCR
 from .plate_detector import PlateDetector
 from .paths import application_directory
 from .vehicle_detector import VehicleDetector
-from .video_pipeline import run_video
+from .video.pipeline import run_video
 
 
 IMAGE_EXTENSIONS = frozenset({".jpg", ".jpeg", ".png", ".bmp", ".webp"})
@@ -95,8 +94,12 @@ class ALPRPipeline:
     def _output_path(self, source: Path, output: str | Path | None) -> Path:
         if output is not None:
             return Path(output)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        return application_directory() / "output" / f"{source.stem}_{timestamp}.json"
+        return (
+            application_directory()
+            / "output"
+            / source.stem
+            / f"{source.stem}.json"
+        )
 
     @staticmethod
     def _artifact_stem(source: Path, output_path: Path, output: str | Path | None) -> str:

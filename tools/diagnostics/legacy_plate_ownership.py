@@ -106,6 +106,12 @@ def resolve_plate_ownership_detailed(
     for first in range(candidate_count):
         for second in range(first + 1, candidate_count):
             if (
+                valid_candidates[first].track_id
+                == valid_candidates[second].track_id
+            ):
+                union(first, second)
+                continue
+            if (
                 bbox_iou(
                     valid_candidates[first].plate_bbox,
                     valid_candidates[second].plate_bbox,
