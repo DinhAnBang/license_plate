@@ -9,12 +9,16 @@ from .ocr_fusion import OCRFusionConfig
 from .plate_buffer import PlateBufferConfig
 from .plate_quality import PlateQualityConfig
 from .plate_ownership_temporal import TemporalPlateOwnershipConfig
+from .paths import application_directory
 from .vn_plate_postprocessor import VietnamPostprocessConfig
+
+
+_APP_DIRECTORY = application_directory()
 
 
 @dataclass(frozen=True, slots=True)
 class VehicleConfig:
-    model: Path = Path("models/vehicle/yolo26n.onnx")
+    model: Path = _APP_DIRECTORY / "models" / "vehicle" / "yolo26n.onnx"
     confidence: float = 0.10
     image_confidence: float = 0.25
     iou: float = 0.45
@@ -40,14 +44,14 @@ class TrackingConfig:
 
 @dataclass(frozen=True, slots=True)
 class PlateConfig:
-    model: Path = Path("models/plate/best.onnx")
+    model: Path = _APP_DIRECTORY / "models" / "plate" / "best.onnx"
     confidence: float = 0.25
     iou: float = 0.45
 
 
 @dataclass(frozen=True, slots=True)
 class OCRConfig:
-    model: Path = Path("models/OCR/microcharnet.onnx")
+    model: Path = _APP_DIRECTORY / "models" / "OCR" / "microcharnet.onnx"
     confidence: float = 0.25
     iou: float = 0.70
 

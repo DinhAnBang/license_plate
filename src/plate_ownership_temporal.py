@@ -60,6 +60,9 @@ class TemporalPlateOwnershipConfig:
     relative_height_tolerance: float = 0.50
     minimum_center_scale: float = 0.05
     minimum_relative_size_scale: float = 0.05
+    min_temporal_accept_score: float = 0.20
+    max_center_jump: float = 0.25
+    max_relative_size_ratio: float = 2.50
 
     def __post_init__(self) -> None:
         if self.history_size < 1:
@@ -101,9 +104,15 @@ class TemporalPlateOwnershipConfig:
             "relative_height_tolerance",
             "minimum_center_scale",
             "minimum_relative_size_scale",
+            "min_temporal_accept_score",
+            "max_center_jump",
         ):
             if float(getattr(self, name)) < 0.0:
                 raise ValueError(f"{name} cannot be negative")
+        if self.min_temporal_accept_score > 1.0:
+            raise ValueError("min_temporal_accept_score must be <= 1")
+        if not np.isfinite(self.max_relative_size_ratio) or self.max_relative_size_ratio < 1.0:
+            raise ValueError("max_relative_size_ratio must be finite and >= 1")
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,6 +130,7 @@ class TemporalCandidateDiagnostic:
     conflict_group: int | None
     selected: bool
     history_updated: bool
+    rejected_by_history: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,6 +144,7 @@ class TemporalPlateOwnershipStats:
     final_results: int
     changed_owner_groups: int
     history_updates: int
+    temporal_outliers_rejected: int
     elapsed_ms: float
     relative_geometry_ms: float
     history_scoring_ms: float
@@ -159,6 +170,7 @@ class _CandidateState:
     conflict_group: int | None = None
     selected: bool = False
     history_updated: bool = False
+    rejected_by_history: bool = False
 
 
 def compute_relative_geometry(
@@ -263,15 +275,21 @@ class TemporalPlateOwnershipResolver:
                 state.history_samples,
                 state.history_reliable,
             ) = self._temporal_score(state.candidate.track_id, state.geometry)
+            if self._is_temporal_outlier(state):
+                state.rejected_by_history = True
         history_scoring_elapsed = time.perf_counter() - history_scoring_started
 
-        groups = self._conflict_groups(states)
+        eligible_states = [state for state in states if not state.rejected_by_history]
+        groups = self._conflict_groups(eligible_states)
         conflict_groups = 0
         definite_groups = 0
         ambiguous_groups = 0
         removed_candidates = 0
         changed_owner_groups = 0
         history_updates = 0
+        temporal_outliers_rejected = sum(
+            state.rejected_by_history for state in states
+        )
 
         selected: list[TrackedPlateCandidate] = []
         for group_index, group in enumerate(groups):
@@ -336,6 +354,7 @@ class TemporalPlateOwnershipResolver:
                 final_results=len(selected),
                 changed_owner_groups=changed_owner_groups,
                 history_updates=history_updates,
+                temporal_outliers_rejected=temporal_outliers_rejected,
                 elapsed_ms=elapsed_ms,
                 relative_geometry_ms=geometry_elapsed * 1000.0,
                 history_scoring_ms=history_scoring_elapsed * 1000.0,
@@ -414,6 +433,39 @@ class TemporalPlateOwnershipResolver:
         scale = np.maximum(scale, configured_tolerance)
         deviation = float(np.mean(np.abs(current - median) / scale))
         return float(np.exp(-deviation)), samples, True
+
+    def _is_temporal_outlier(self, state: _CandidateState) -> bool:
+        """Reject a mature track candidate that jumps away from plate history."""
+
+        if not state.history_reliable:
+            return False
+        history = self._history.get(state.candidate.track_id)
+        if not history:
+            return False
+        previous = history[-1]
+        center_jump = float(np.hypot(
+            state.geometry.center_x - previous.center_x,
+            state.geometry.center_y - previous.center_y,
+        ))
+
+        def size_ratio(current: float, prior: float) -> float:
+            smaller = min(current, prior)
+            if smaller <= 0.0:
+                return float("inf")
+            return max(current, prior) / smaller
+
+        width_ratio = size_ratio(
+            state.geometry.relative_width, previous.relative_width,
+        )
+        height_ratio = size_ratio(
+            state.geometry.relative_height, previous.relative_height,
+        )
+        return (
+            state.temporal_score < self.config.min_temporal_accept_score
+            or center_jump > self.config.max_center_jump
+            or width_ratio > self.config.max_relative_size_ratio
+            or height_ratio > self.config.max_relative_size_ratio
+        )
 
     def _conflict_groups(
         self, states: Sequence[_CandidateState]
@@ -535,4 +587,5 @@ class TemporalPlateOwnershipResolver:
             conflict_group=state.conflict_group,
             selected=state.selected,
             history_updated=state.history_updated,
+            rejected_by_history=state.rejected_by_history,
         )

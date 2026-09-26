@@ -11,6 +11,7 @@ from pathlib import Path
 
 from src.alpr_pipeline import ALPRPipeline, IMAGE_EXTENSIONS, VIDEO_EXTENSIONS
 from src.customer_output import build_customer_payload, write_customer_json
+from src.paths import application_directory
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -36,9 +37,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def _application_directory() -> Path:
     """Return the directory containing the executable, or the source app."""
 
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).resolve().parent
-    return Path(__file__).resolve().parent
+    return application_directory()
 
 
 def _release_paths(source: Path) -> tuple[Path, Path]:

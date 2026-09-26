@@ -51,6 +51,35 @@ def test_temporal_ownership_keeps_history_and_one_owner():
     assert second.stats.removed_conflict_candidates == 1
 
 
+def test_temporal_ownership_rejects_single_candidate_that_jumps_from_history():
+    resolver = TemporalPlateOwnershipResolver()
+    for frame_index in range(5):
+        accepted = resolver.resolve(frame_index, [plate(1, frame=frame_index)])
+        assert len(accepted.candidates) == 1
+
+    history_before = resolver.history[1]
+    rejected = resolver.resolve(
+        5, [plate(1, frame=5, box=(65, 10, 95, 25), confidence=0.99)],
+    )
+
+    assert rejected.candidates == ()
+    assert rejected.stats.temporal_outliers_rejected == 1
+    assert rejected.stats.history_updates == 0
+    assert rejected.diagnostics[0].rejected_by_history is True
+    assert resolver.history[1] == history_before
+
+
+def test_temporal_ownership_accepts_small_motion_after_history_is_reliable():
+    resolver = TemporalPlateOwnershipResolver()
+    for frame_index in range(5):
+        resolver.resolve(frame_index, [plate(1, frame=frame_index)])
+
+    moved = resolver.resolve(5, [plate(1, frame=5, box=(23, 59, 53, 74))])
+
+    assert len(moved.candidates) == 1
+    assert moved.stats.temporal_outliers_rejected == 0
+
+
 def test_quality_and_topk_snapshot():
     frame = np.zeros((100, 120, 3), dtype=np.uint8)
     frame[60:75, 20:50] = 200

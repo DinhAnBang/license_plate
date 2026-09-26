@@ -160,6 +160,7 @@ def run_image(
         },
     }
     if annotated is not None:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
         annotated_path = output_path.parent / f"{artifact_stem}_annotated.jpg"
         if not cv2.imwrite(str(annotated_path), annotated):
             raise OSError(f"Could not write annotated image: {annotated_path}")

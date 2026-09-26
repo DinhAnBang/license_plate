@@ -12,6 +12,7 @@ from .config import PipelineConfig
 from .image_pipeline import run_image
 from .microcharnet_ocr import MicroCharNetOCR
 from .plate_detector import PlateDetector
+from .paths import application_directory
 from .vehicle_detector import VehicleDetector
 from .video_pipeline import run_video
 
@@ -95,7 +96,7 @@ class ALPRPipeline:
         if output is not None:
             return Path(output)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        return Path("output") / f"{source.stem}_{timestamp}.json"
+        return application_directory() / "output" / f"{source.stem}_{timestamp}.json"
 
     @staticmethod
     def _artifact_stem(source: Path, output_path: Path, output: str | Path | None) -> str:
