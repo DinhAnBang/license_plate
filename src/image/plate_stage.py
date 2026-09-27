@@ -2,16 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-
 import numpy as np
 
-from .plate_detector import PlateDetection, PlateDetector
+from ..plate_detector import PlateDetection, PlateDetector
 from .plate_buffer import BufferedPlateCandidate
 from .plate_quality import PlateQualityMetrics
-from .plate_types import TrackedPlateCandidate
-from .tracking.byte_tracker import TrackedVehicle
-from .vehicle_detector import VehicleDetection
+from .plate_types import ImagePlateCandidate
+from ..vehicle_detector import VehicleDetection
 
 
 def crop_vehicle_roi(
@@ -57,39 +54,13 @@ def local_bbox_to_global(
     return global_x1, global_y1, global_x2, global_y2
 
 
-def select_best_plate(plates: Sequence[PlateDetection]) -> PlateDetection | None:
-    return max(plates, key=lambda plate: plate.confidence, default=None)
-
-
-def detect_vehicle_plate(
-    frame: np.ndarray,
-    vehicle: VehicleDetection | TrackedVehicle,
-    identity: int,
-    plate_detector: PlateDetector,
-    frame_index: int,
-) -> TrackedPlateCandidate | None:
-    """Compatibility adapter returning only the highest-confidence candidate.
-
-    Production orchestration uses :func:`detect_vehicle_plates` so ownership
-    can score every post-NMS detector candidate before selecting an owner.
-    """
-
-    return max(
-        detect_vehicle_plates(
-            frame, vehicle, identity, plate_detector, frame_index,
-        ),
-        key=lambda candidate: candidate.plate_confidence,
-        default=None,
-    )
-
-
 def detect_vehicle_plates(
     frame: np.ndarray,
-    vehicle: VehicleDetection | TrackedVehicle,
-    identity: int,
+    vehicle: VehicleDetection,
+    vehicle_index: int,
     plate_detector: PlateDetector,
     frame_index: int,
-) -> list[TrackedPlateCandidate]:
+) -> list[ImagePlateCandidate]:
     """Adapt all post-NMS plate detections to global-frame candidates."""
 
     frame_height, frame_width = frame.shape[:2]
@@ -97,7 +68,7 @@ def detect_vehicle_plates(
     if cropped is None:
         return []
     vehicle_roi, vehicle_bbox = cropped
-    results: list[TrackedPlateCandidate] = []
+    results: list[ImagePlateCandidate] = []
     for plate in plate_detector.detect(vehicle_roi):
         global_bbox = local_bbox_to_global(
             plate.bbox, vehicle_bbox, frame_width, frame_height,
@@ -105,9 +76,9 @@ def detect_vehicle_plates(
         if global_bbox[2] <= global_bbox[0] or global_bbox[3] <= global_bbox[1]:
             continue
         results.append(
-            TrackedPlateCandidate(
+            ImagePlateCandidate(
                 frame_index=frame_index,
-                track_id=identity,
+                vehicle_index=vehicle_index,
                 vehicle_class_id=vehicle.class_id,
                 vehicle_class_name=vehicle.class_name,
                 vehicle_confidence=vehicle.confidence,
@@ -121,33 +92,15 @@ def detect_vehicle_plates(
     return results
 
 
-def detect_tracked_plates(
-    frame: np.ndarray,
-    tracks: Sequence[TrackedVehicle],
-    plate_detector: PlateDetector,
-    frame_index: int,
-) -> list[TrackedPlateCandidate]:
-    """Detect all post-NMS plates for every valid confirmed track ROI."""
-
-    results: list[TrackedPlateCandidate] = []
-    for track in tracks:
-        results.extend(
-            detect_vehicle_plates(
-                frame, track, track.track_id, plate_detector, frame_index,
-            )
-        )
-    return results
-
-
 def buffered_plate_candidate(
-    plate: TrackedPlateCandidate,
+    plate: ImagePlateCandidate,
     crop: np.ndarray,
     quality: PlateQualityMetrics,
 ) -> BufferedPlateCandidate:
-    """Preserve one resolved plate and its crop for image or video OCR."""
+    """Preserve one resolved plate and its crop for image OCR."""
 
     return BufferedPlateCandidate(
-        frame_index=plate.frame_index, track_id=plate.track_id,
+        frame_index=plate.frame_index, vehicle_index=plate.vehicle_index,
         plate_class_id=plate.plate_class_id,
         plate_class_name=plate.plate_class_name,
         plate_confidence=plate.plate_confidence,

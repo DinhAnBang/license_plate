@@ -54,10 +54,12 @@ def build_customer_payload(
         confidence = float(plate.get("confidence", 0.0))
         if not is_customer_result(item, min_confidence=min_confidence):
             continue
-        identity = item.get("track_id", item.get("vehicle_index"))
+        identity = item.get("vehicle_index")
+        if identity is None:
+            continue
         vehicles.append(
             {
-                "track_id": identity,
+                "vehicle_index": identity,
                 "vehicle_type": vehicle.get("class_name"),
                 "license": _license_text(plate),
                 "confidence": confidence,

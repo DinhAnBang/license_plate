@@ -15,8 +15,8 @@ from typing import Iterable, Sequence
 
 import numpy as np
 
-from .plate_types import TrackedPlateCandidate
-from .geometry import (
+from .plate_types import ImagePlateCandidate
+from ..geometry import (
     intersection_area as _intersection_area,
     bbox_center,
     bbox_iou,
@@ -24,7 +24,7 @@ from .geometry import (
     point_inside_bbox,
     valid_bbox as _valid_bbox,
 )
-from .tracking.matching import INF_COST, linear_assignment
+from .matching import INF_COST, linear_assignment
 
 
 BBox = tuple[int, int, int, int]
@@ -118,7 +118,7 @@ class TemporalPlateOwnershipConfig:
 
 @dataclass(frozen=True, slots=True)
 class TemporalCandidateDiagnostic:
-    track_id: int
+    vehicle_index: int
     plate_bbox: BBox
     vehicle_bbox: BBox
     relative_geometry: RelativePlateGeometry
@@ -153,14 +153,14 @@ class TemporalPlateOwnershipStats:
 
 @dataclass(frozen=True, slots=True)
 class TemporalPlateOwnershipResolution:
-    candidates: tuple[TrackedPlateCandidate, ...]
+    candidates: tuple[ImagePlateCandidate, ...]
     stats: TemporalPlateOwnershipStats
     diagnostics: tuple[TemporalCandidateDiagnostic, ...] = ()
 
 
 @dataclass(slots=True)
 class _CandidateState:
-    candidate: TrackedPlateCandidate
+    candidate: ImagePlateCandidate
     geometry: RelativePlateGeometry
     containment_score: float
     temporal_score: float
@@ -224,20 +224,20 @@ class TemporalPlateOwnershipResolver:
     def history(self) -> dict[int, tuple[RelativePlateGeometry, ...]]:
         """Expose immutable snapshots for debug/tests."""
 
-        return {track_id: tuple(values) for track_id, values in self._history.items()}
+        return {vehicle_index: tuple(values) for vehicle_index, values in self._history.items()}
 
-    def cleanup(self, active_track_ids: Iterable[int]) -> None:
-        """Drop histories for tracks known to be removed."""
+    def cleanup(self, active_vehicle_indices: Iterable[int]) -> None:
+        """Drop histories for image vehicle indices no longer present."""
 
-        active = {int(track_id) for track_id in active_track_ids}
-        for track_id in tuple(self._history):
-            if track_id not in active:
-                del self._history[track_id]
+        active = {int(vehicle_index) for vehicle_index in active_vehicle_indices}
+        for vehicle_index in tuple(self._history):
+            if vehicle_index not in active:
+                del self._history[vehicle_index]
 
     def resolve(
         self,
         frame_index: int,
-        candidates: Sequence[TrackedPlateCandidate],
+        candidates: Sequence[ImagePlateCandidate],
     ) -> TemporalPlateOwnershipResolution:
         """Resolve one frame of raw candidates and safely update history."""
 
@@ -275,7 +275,7 @@ class TemporalPlateOwnershipResolver:
                 state.temporal_score,
                 state.history_samples,
                 state.history_reliable,
-            ) = self._temporal_score(state.candidate.track_id, state.geometry)
+            ) = self._temporal_score(state.candidate.vehicle_index, state.geometry)
             if self._is_temporal_outlier(state):
                 state.rejected_by_history = True
         history_scoring_elapsed = time.perf_counter() - history_scoring_started
@@ -326,14 +326,14 @@ class TemporalPlateOwnershipResolver:
         # Distinct physical groups offered to the same track are also a
         # selection conflict, even though they must stay separate for the
         # global one-to-one assignment above.
-        groups_by_track: dict[int, set[int]] = {}
+        groups_by_vehicle: dict[int, set[int]] = {}
         for state in eligible_states:
-            groups_by_track.setdefault(state.candidate.track_id, set()).add(
+            groups_by_vehicle.setdefault(state.candidate.vehicle_index, set()).add(
                 group_by_state_id[id(state)]
             )
         same_track_conflicts = sum(
             len(group_indexes) > 1
-            for group_indexes in groups_by_track.values()
+            for group_indexes in groups_by_vehicle.values()
         )
         conflict_groups += same_track_conflicts
         ambiguous_groups += same_track_conflicts
@@ -347,7 +347,7 @@ class TemporalPlateOwnershipResolver:
             group = groups[group_index]
             if (
                 len(group) > 1
-                and self._legacy_owner(group) != state.candidate.track_id
+                and self._legacy_owner(group) != state.candidate.vehicle_index
             ):
                 changed_owner_groups += 1
 
@@ -356,7 +356,7 @@ class TemporalPlateOwnershipResolver:
                 for other in eligible_states
                 if id(other) not in selected_ids
                 and (
-                    other.candidate.track_id == state.candidate.track_id
+                    other.candidate.vehicle_index == state.candidate.vehicle_index
                     or group_by_state_id[id(other)] == group_index
                 )
             ]
@@ -373,7 +373,7 @@ class TemporalPlateOwnershipResolver:
 
         selected = [state.candidate for state in selected_states]
 
-        selected.sort(key=lambda candidate: candidate.track_id)
+        selected.sort(key=lambda candidate: candidate.vehicle_index)
         elapsed_ms = (time.perf_counter() - started) * 1000.0
         self.total_elapsed_seconds += elapsed_ms / 1000.0
         self.total_relative_geometry_seconds += geometry_elapsed
@@ -402,7 +402,7 @@ class TemporalPlateOwnershipResolver:
         self.last_resolution = resolution
         return resolution
 
-    def _valid_candidate(self, candidate: TrackedPlateCandidate) -> bool:
+    def _valid_candidate(self, candidate: ImagePlateCandidate) -> bool:
         return (
             _valid_bbox(candidate.plate_bbox)
             and _valid_bbox(candidate.vehicle_bbox)
@@ -412,15 +412,15 @@ class TemporalPlateOwnershipResolver:
             )
         )
 
-    def _history_for(self, track_id: int) -> deque[RelativePlateGeometry]:
+    def _history_for(self, vehicle_index: int) -> deque[RelativePlateGeometry]:
         return self._history.setdefault(
-            track_id, deque(maxlen=self.config.history_size)
+            vehicle_index, deque(maxlen=self.config.history_size)
         )
 
     def _temporal_score(
-        self, track_id: int, geometry: RelativePlateGeometry
+        self, vehicle_index: int, geometry: RelativePlateGeometry
     ) -> tuple[float, int, bool]:
-        history = self._history.get(track_id)
+        history = self._history.get(vehicle_index)
         samples = len(history) if history is not None else 0
         if samples < self.config.min_history_samples:
             return self.config.cold_start_temporal_score, samples, False
@@ -477,7 +477,7 @@ class TemporalPlateOwnershipResolver:
 
         if not state.history_reliable:
             return False
-        history = self._history.get(state.candidate.track_id)
+        history = self._history.get(state.candidate.vehicle_index)
         if not history:
             return False
         previous = history[-1]
@@ -564,19 +564,19 @@ class TemporalPlateOwnershipResolver:
     ) -> list[_CandidateState]:
         """Return the best one-to-one track/physical-plate assignment."""
 
-        track_ids = sorted(
-            {state.candidate.track_id for group in groups for state in group}
+        vehicle_indices = sorted(
+            {state.candidate.vehicle_index for group in groups for state in group}
         )
-        if not track_ids or not groups:
+        if not vehicle_indices or not groups:
             return []
 
-        track_index = {
-            track_id: index for index, track_id in enumerate(track_ids)
+        vehicle_index_lookup = {
+            vehicle_index: index for index, vehicle_index in enumerate(vehicle_indices)
         }
         best_edges: dict[tuple[int, int], _CandidateState] = {}
         for group_index, group in enumerate(groups):
             for state in group:
-                edge = (track_index[state.candidate.track_id], group_index)
+                edge = (vehicle_index_lookup[state.candidate.vehicle_index], group_index)
                 previous = best_edges.get(edge)
                 if previous is None or self._owner_key(state) > self._owner_key(
                     previous
@@ -584,7 +584,7 @@ class TemporalPlateOwnershipResolver:
                     best_edges[edge] = state
 
         costs = np.full(
-            (len(track_ids), len(groups)), INF_COST, dtype=np.float64
+            (len(vehicle_indices), len(groups)), INF_COST, dtype=np.float64
         )
         for edge, state in best_edges.items():
             costs[edge] = 1.0 - state.owner_score
@@ -626,7 +626,7 @@ class TemporalPlateOwnershipResolver:
             state.tight_parent_score,
             state.candidate.plate_confidence,
             state.candidate.vehicle_confidence,
-            -state.candidate.track_id,
+            -state.candidate.vehicle_index,
         )
 
     @staticmethod
@@ -637,16 +637,16 @@ class TemporalPlateOwnershipResolver:
                 state.containment_score,
                 state.candidate.plate_confidence,
                 state.candidate.vehicle_confidence,
-                -state.candidate.track_id,
+                -state.candidate.vehicle_index,
             ),
-        ).candidate.track_id
+        ).candidate.vehicle_index
 
     def _update_history(self, state: _CandidateState) -> None:
-        self._history_for(state.candidate.track_id).append(state.geometry)
+        self._history_for(state.candidate.vehicle_index).append(state.geometry)
 
     def _diagnostic(self, state: _CandidateState) -> TemporalCandidateDiagnostic:
         return TemporalCandidateDiagnostic(
-            track_id=state.candidate.track_id,
+            vehicle_index=state.candidate.vehicle_index,
             plate_bbox=state.candidate.plate_bbox,
             vehicle_bbox=state.candidate.vehicle_bbox,
             relative_geometry=state.geometry,

@@ -13,7 +13,6 @@ from .microcharnet_ocr import MicroCharNetOCR
 from .plate_detector import PlateDetector
 from .paths import application_directory
 from .vehicle_detector import VehicleDetector
-from .video.pipeline import run_video
 
 
 IMAGE_EXTENSIONS = frozenset({".jpg", ".jpeg", ".png", ".bmp", ".webp"})
@@ -116,16 +115,5 @@ class ALPRPipeline:
             self, path, output=output, save_annotated=save_annotated,
             save_topk_crops=save_topk_crops, debug=debug,
         )
-
-    def process_video(
-        self, path: str | Path, *, output: str | Path | None = None,
-        save_annotated: bool = False, save_topk_crops: bool = False,
-        debug: bool | None = None,
-    ) -> dict[str, Any]:
-        return run_video(
-            self, path, output=output, save_annotated=save_annotated,
-            save_topk_crops=save_topk_crops, debug=debug,
-        )
-
 
 __all__ = ["ALPRPipeline", "IMAGE_EXTENSIONS", "VIDEO_EXTENSIONS"]

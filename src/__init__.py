@@ -2,7 +2,7 @@
 
 from .vehicle_detector import VEHICLE_CLASSES, VehicleDetection, VehicleDetector
 from .microcharnet_ocr import MicroCharNetOCR, OCRResult
-from .ocr_stage import OCRPlateCandidate
+from .image.ocr_stage import OCRPlateCandidate
 
 __all__ = [
     "VEHICLE_CLASSES",

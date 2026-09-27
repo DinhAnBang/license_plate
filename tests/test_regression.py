@@ -7,28 +7,25 @@ from src.microcharnet_ocr import (
     MicroCharNetOCR, OCRCharacter, OCRResult, _RawCharacter, _Transform,
     _class_agnostic_nms, _group_and_sort_characters,
 )
-from src.customer_output import build_customer_payload
+from src.image.customer_output import build_customer_payload
 from src.ocr_fusion import OCRFusionCandidate, fuse_track
 from src.ocr_serialization import build_fused_json, build_ocr_json
-from src.ocr_stage import OCRPlateCandidate
-from src.plate_buffer import BufferedPlateCandidate, PlateBufferConfig, PlateBufferManager
+from src.image.ocr_stage import OCRPlateCandidate
 from src.plate_detector import PlateDetection
-from src.plate_types import TrackedPlateCandidate
+from src.image.plate_types import ImagePlateCandidate
 from src.geometry import bbox_iou, intersection_over_plate_area
 from tools.diagnostics.legacy_plate_ownership import resolve_plate_ownership
-from src.plate_ownership_temporal import TemporalPlateOwnershipResolver
-from src.plate_quality import PlateQualityMetrics, crop_plate_from_frame, score_plate_quality
-from src.plate_stage import detect_vehicle_plates
-from src.result_finalizer import finalize_vehicle
-from src.result_serialization import serialize_vehicle_result
-from src.vn_plate_postprocessor import postprocess_vietnam_plate
-from src.tracking import ByteTracker, TrackRemovalReason
+from src.image.plate_ownership_temporal import TemporalPlateOwnershipResolver
+from src.image.plate_stage import detect_vehicle_plates
+from src.image.result_finalizer import finalize_vehicle
+from src.image.result_serialization import serialize_vehicle_result
+from src.image.vn_plate_postprocessor import postprocess_vietnam_plate
 from src.vehicle_detector import VehicleDetection
 
 
-def plate(track_id=1, frame=0, box=(20, 60, 50, 75), confidence=0.9):
-    return TrackedPlateCandidate(
-        frame_index=frame, track_id=track_id, vehicle_class_id=2,
+def plate(vehicle_index=1, frame=0, box=(20, 60, 50, 75), confidence=0.9):
+    return ImagePlateCandidate(
+        frame_index=frame, vehicle_index=vehicle_index, vehicle_class_id=2,
         vehicle_class_name="car", vehicle_confidence=0.9,
         vehicle_bbox=(0, 0, 100, 100), plate_class_id=1,
         plate_class_name="dai", plate_confidence=confidence, plate_bbox=box,
@@ -38,7 +35,7 @@ def plate(track_id=1, frame=0, box=(20, 60, 50, 75), confidence=0.9):
 def test_geometry_and_ownership_snapshot():
     assert bbox_iou((0, 0, 10, 10), (5, 0, 15, 10)) == pytest.approx(1 / 3)
     assert intersection_over_plate_area((0, 0, 10, 10), (0, 0, 5, 10)) == 0.5
-    assert [item.track_id for item in resolve_plate_ownership([
+    assert [item.vehicle_index for item in resolve_plate_ownership([
         plate(1, confidence=0.8), plate(2, confidence=0.9),
     ])] == [2]
     assert resolve_plate_ownership([
@@ -50,7 +47,7 @@ def test_geometry_and_ownership_snapshot():
 def test_temporal_ownership_keeps_history_and_one_owner():
     resolver = TemporalPlateOwnershipResolver()
     first = resolver.resolve(0, [plate(1)])
-    assert [item.track_id for item in first.candidates] == [1]
+    assert [item.vehicle_index for item in first.candidates] == [1]
     assert first.stats.history_updates == 1
     second = resolver.resolve(1, [plate(1, frame=1), plate(2, frame=1, confidence=0.1)])
     assert len(second.candidates) == 1
@@ -100,14 +97,14 @@ def test_temporal_ownership_assigns_nearby_vehicles_their_own_plates():
         2: (125, 60, 155, 75),
     }
 
-    def candidate(track_id, frame_index, plate_bbox, confidence=0.8):
-        return TrackedPlateCandidate(
+    def candidate(vehicle_index, frame_index, plate_bbox, confidence=0.8):
+        return ImagePlateCandidate(
             frame_index=frame_index,
-            track_id=track_id,
+            vehicle_index=vehicle_index,
             vehicle_class_id=2,
             vehicle_class_name="car",
             vehicle_confidence=0.9,
-            vehicle_bbox=vehicle_boxes[track_id],
+            vehicle_bbox=vehicle_boxes[vehicle_index],
             plate_class_id=1,
             plate_class_name="dai",
             plate_confidence=confidence,
@@ -138,75 +135,11 @@ def test_temporal_ownership_assigns_nearby_vehicles_their_own_plates():
     )
 
     selected = {
-        item.track_id: item.plate_bbox for item in resolution.candidates
+        item.vehicle_index: item.plate_bbox for item in resolution.candidates
     }
     assert selected == own_plate_boxes
     assert resolution.stats.final_results == 2
     assert resolution.stats.removed_conflict_candidates == 2
-
-
-def test_quality_and_topk_snapshot():
-    frame = np.zeros((100, 120, 3), dtype=np.uint8)
-    frame[60:75, 20:50] = 200
-    crop = crop_plate_from_frame(frame, (20, 60, 50, 75))
-    assert crop is not None and crop.shape == (15, 30, 3)
-    assert crop_plate_from_frame(frame, (-1, 60, 50, 75)) is None
-    quality = score_plate_quality(crop, 0.9)
-    assert 0 <= quality.total_score <= 1
-    manager = PlateBufferManager(PlateBufferConfig(top_k=2, min_frame_gap=2))
-    for frame_index in (0, 1, 3):
-        manager.mark_vehicle_seen(1, frame_index)
-        manager.add_plate(BufferedPlateCandidate(
-            frame_index, 1, 1, "dai", 0.9, (20, 60, 50, 75), quality, crop,
-        ))
-    assert [candidate.frame_index for candidate in manager.get_top_candidates(1)] == [0, 3]
-    assert manager.get_track_summary(1).plate_observation_count == 3
-
-
-def test_topk_frontier_recovers_compatible_evidence_after_better_middle_crop():
-    crop = np.zeros((10, 20, 3), dtype=np.uint8)
-
-    def candidate(frame_index, score):
-        quality = PlateQualityMetrics(
-            plate_confidence=0.9,
-            width=20,
-            height=10,
-            sharpness_raw=score * 100.0,
-            sharpness_score=score,
-            size_score=score,
-            exposure_score=score,
-            total_score=score,
-        )
-        return BufferedPlateCandidate(
-            frame_index, 1, 1, "dai", 0.9, (0, 0, 20, 10), quality, crop,
-        )
-
-    manager = PlateBufferManager(PlateBufferConfig(top_k=4, min_frame_gap=2))
-    manager.add_plate(candidate(0, 0.80))
-    manager.add_plate(candidate(1, 0.90))
-    manager.add_plate(candidate(2, 1.00))
-
-    assert [item.frame_index for item in manager.get_top_candidates(1)] == [2, 0]
-
-
-def test_topk_rejects_out_of_order_input_without_mutating_evidence():
-    crop = np.zeros((10, 20, 3), dtype=np.uint8)
-    quality = PlateQualityMetrics(0.9, 20, 10, 100.0, 0.9, 0.9, 0.9, 0.9)
-
-    def candidate(frame_index):
-        return BufferedPlateCandidate(
-            frame_index, 1, 1, "dai", 0.9, (0, 0, 20, 10), quality, crop,
-        )
-
-    manager = PlateBufferManager(PlateBufferConfig(top_k=4, min_frame_gap=2))
-    manager.add_plate(candidate(0))
-    manager.add_plate(candidate(2))
-
-    with pytest.raises(ValueError, match="strictly increasing frame order"):
-        manager.add_plate(candidate(1))
-
-    assert [item.frame_index for item in manager.get_top_candidates(1)] == [0, 2]
-    assert manager.get_track_summary(1).plate_observation_count == 2
 
 
 def test_plate_ownership_selects_after_all_vehicle_candidates_are_adapted():
@@ -220,14 +153,14 @@ def test_plate_ownership_selects_after_all_vehicle_candidates_are_adapted():
     frame = np.zeros((100, 120, 3), dtype=np.uint8)
     vehicle = VehicleDetection(2, "car", 0.9, (10, 10, 110, 90))
     candidates = detect_vehicle_plates(
-        frame, vehicle, identity=7, plate_detector=MultiplePlateDetector(),
+        frame, vehicle, vehicle_index=7, plate_detector=MultiplePlateDetector(),
         frame_index=0,
     )
 
     assert len(candidates) == 2
     resolution = TemporalPlateOwnershipResolver().resolve(0, candidates)
     assert len(resolution.candidates) == 1
-    assert resolution.candidates[0].track_id == 7
+    assert resolution.candidates[0].vehicle_index == 7
     assert resolution.candidates[0].plate_confidence == pytest.approx(0.95)
     assert resolution.stats.conflict_groups == 1
     assert resolution.stats.removed_conflict_candidates == 1
@@ -300,63 +233,6 @@ def test_ocr_groups_tilted_two_line_plate_before_sorting_columns():
     ]
 
 
-def test_tracker_cross_class_duplicate_cleanup():
-    tracker = ByteTracker(fps=30.0)
-    detections = [
-        VehicleDetection(2, "car", 0.9, (0, 0, 100, 100)),
-        VehicleDetection(7, "truck", 0.8, (0, 0, 100, 100)),
-    ]
-    assert tracker.update(detections, 0) == []
-    tracks = tracker.update(detections, 1)
-    assert len(tracks) == 1
-    assert tracks[0].class_name == "car"
-    assert tracker.diagnostics["cross_class_detections_removed"] == 2
-
-
-def test_duplicate_track_is_not_emitted_as_a_second_vehicle():
-    tracker = ByteTracker(
-        fps=30.0,
-        min_confirmed_hits=1,
-        cross_class_dedup_enabled=False,
-        active_duplicate_suppression_enabled=True,
-        active_duplicate_iou_threshold=0.40,
-        active_duplicate_min_frames=1,
-    )
-    first_frame = [
-        VehicleDetection(2, "car", 0.95, (0, 0, 100, 100)),
-        VehicleDetection(2, "car", 0.95, (120, 0, 220, 100)),
-    ]
-    overlapping_frame = [
-        VehicleDetection(2, "car", 0.95, (50, 0, 150, 100)),
-        VehicleDetection(2, "car", 0.95, (55, 0, 155, 100)),
-    ]
-
-    tracker.update(first_frame, 0)
-    tracker.update(overlapping_frame, 1)
-
-    assert len(tracker.all_tracks) == 2  # Diagnostic history remains visible.
-    assert [track.track_id for track in tracker.result_tracks] == [1]
-    duplicate = next(track for track in tracker.all_tracks if track.track_id == 2)
-    assert duplicate.removal_reason is TrackRemovalReason.DUPLICATE
-    assert duplicate.duplicate_of_track_id == 1
-
-    # A real track removed by timeout must still be emitted at end of video.
-    timeout_tracker = ByteTracker(
-        fps=1.0,
-        min_confirmed_hits=1,
-        track_buffer_seconds=0.0,
-    )
-    timeout_tracker.update(
-        [VehicleDetection(2, "car", 0.95, (0, 0, 100, 100))], 0,
-    )
-    timeout_tracker.update([], 1)
-    assert len(timeout_tracker.result_tracks) == 1
-    assert (
-        timeout_tracker.result_tracks[0].removal_reason
-        is TrackRemovalReason.TIMEOUT
-    )
-
-
 def test_fusion_postprocess_and_result_schema_snapshot():
     candidates = [
         OCRFusionCandidate(1, 1, 1, "51A12345", 0.9, 0.8),
@@ -379,7 +255,7 @@ def test_fusion_postprocess_and_result_schema_snapshot():
         "low_confidence_extra_character",
     ]
     result = finalize_vehicle(
-        identity_key="track_id", identity=1, vehicle_class_id=2,
+        identity_key="vehicle_index", identity=1, vehicle_class_id=2,
         vehicle_class_name="car", first_frame=0, last_frame=4,
         vehicle_observation_count=5, plate_observation_count=2,
         plate_layout="dai", best_plate_bbox=(20, 60, 50, 75),
@@ -387,13 +263,13 @@ def test_fusion_postprocess_and_result_schema_snapshot():
         ocr_candidate_count=2,
     )
     payload = serialize_vehicle_result(result)
-    assert set(payload) == {"track_id", "vehicle", "plate", "evidence"}
+    assert set(payload) == {"vehicle_index", "vehicle", "plate", "evidence"}
     assert payload["plate"]["status"] == "ok"
     assert payload["plate"]["formatted"] == "51A-123.45"
     assert payload["evidence"]["support_count"] == 2
     customer = build_customer_payload({"status": "ok", "vehicles": [payload]})
     assert customer == {"status": "ok", "vehicles": [{
-        "track_id": 1, "vehicle_type": "car", "license": "51A-123.45",
+        "vehicle_index": 1, "vehicle_type": "car", "license": "51A-123.45",
         "confidence": payload["plate"]["confidence"], "status": "ok",
     }]}
     assert build_customer_payload(
@@ -452,7 +328,7 @@ def test_fusion_postprocess_and_result_schema_snapshot():
         min_confidence=0.5,
     ) == customer
     assert finalize_vehicle(
-        identity_key="track_id", identity=2, vehicle_class_id=2,
+        identity_key="vehicle_index", identity=2, vehicle_class_id=2,
         vehicle_class_name="car", first_frame=0, last_frame=1,
         vehicle_observation_count=2, plate_observation_count=0,
         plate_layout=None, best_plate_bbox=None, best_plate_frame=None,
@@ -469,7 +345,7 @@ def test_diagnostic_ocr_and_fusion_json_contract():
         session_init_count = 1
 
     candidate = OCRPlateCandidate(
-        track_id=1, frame_index=3, rank=1, plate_class_id=1,
+        vehicle_index=1, frame_index=3, rank=1, plate_class_id=1,
         plate_class_name="dai", plate_confidence=0.9, quality_score=0.8,
         bbox=(1, 2, 11, 12), raw_text="51A12345", ocr_confidence=0.9,
         char_confidences=None,

@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .microcharnet_ocr import MicroCharNetOCR
-from .ocr_stage import OCRPlateCandidate
+from .image.ocr_stage import OCRPlateCandidate
 from .ocr_fusion import (
     GAP, FusedOCRResult, OCRFusionCandidate, OCRFusionReport,
     _candidate_from_object, candidate_weight,
@@ -48,7 +48,7 @@ def build_ocr_json(
     candidates = tuple(candidates)
     grouped: dict[int, list[OCRPlateCandidate]] = {}
     for candidate in candidates:
-        grouped.setdefault(candidate.track_id, []).append(candidate)
+        grouped.setdefault(candidate.vehicle_index, []).append(candidate)
     tracks = [
         {
             "track_id": track_id,

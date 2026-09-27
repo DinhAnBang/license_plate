@@ -216,7 +216,9 @@ def _candidate_from_object(
             status=str(status),
         )
 
-    resolved_track = getattr(value, "track_id", track_id)
+    resolved_track = getattr(
+        value, "track_id", getattr(value, "vehicle_index", track_id)
+    )
     return OCRFusionCandidate(
         track_id=int(resolved_track if resolved_track is not None else 0),
         frame_index=int(getattr(value, "frame_index", 0)),

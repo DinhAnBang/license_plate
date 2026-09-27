@@ -8,20 +8,20 @@ from typing import Any
 
 import cv2
 
-from ..ocr_stage import run_ocr_on_image_candidates
-from ..pipeline_support import _debug_ocr, _draw_box, _ms, _plate_display_label, _write_json
-from ..plate_buffer import BufferedPlateCandidate
-from ..plate_ownership_temporal import TemporalPlateOwnershipResolver
-from ..plate_quality import crop_plate_from_frame, score_plate_quality
-from ..plate_stage import buffered_plate_candidate, detect_vehicle_plates
-from ..plate_types import TrackedPlateCandidate
-from ..result_finalizer import finalize_vehicle
-from ..result_serialization import serialize_vehicle_result
-from ..vn_plate_postprocessor import (
+from .ocr_stage import run_ocr_on_image_candidates
+from .pipeline_support import _debug_ocr, _draw_box, _ms, _plate_display_label, _write_json
+from .plate_buffer import BufferedPlateCandidate
+from .plate_ownership_temporal import TemporalPlateOwnershipResolver
+from .plate_quality import crop_plate_from_frame, score_plate_quality
+from .plate_stage import buffered_plate_candidate, detect_vehicle_plates
+from .plate_types import ImagePlateCandidate
+from .result_finalizer import finalize_vehicle
+from .result_serialization import serialize_vehicle_result
+from .vn_plate_postprocessor import (
     postprocess_vietnam_plate,
     preferred_family_for_vehicle_class,
 )
-from ..vehicle_stage import detect_image_vehicles
+from .vehicle_stage import detect_image_vehicles
 
 
 def run_image(
@@ -54,7 +54,7 @@ def run_image(
     )
     vehicle_seconds = time.perf_counter() - stage
     annotated = image.copy() if save_annotated else None
-    raw: list[TrackedPlateCandidate] = []
+    raw: list[ImagePlateCandidate] = []
     for vehicle_index, vehicle in enumerate(vehicles):
         if annotated is not None:
             _draw_box(annotated, vehicle.bbox, f"{vehicle_index} {vehicle.class_name}", (0, 200, 0))
@@ -67,7 +67,7 @@ def run_image(
     stage = time.perf_counter()
     resolution = owner.resolve(0, raw)
     ownership_seconds = time.perf_counter() - stage
-    selected = {candidate.track_id: candidate for candidate in resolution.candidates}
+    selected = {candidate.vehicle_index: candidate for candidate in resolution.candidates}
     image_candidates: list[BufferedPlateCandidate] = []
     quality_seconds = 0.0
     for plate in resolution.candidates:
@@ -79,12 +79,12 @@ def run_image(
         quality_seconds += time.perf_counter() - stage
         image_candidates.append(buffered_plate_candidate(plate, crop, quality))
         if save_topk_crops:
-            crop_path = output_path.parent / "crops" / f"vehicle_{plate.track_id}.jpg"
+            crop_path = output_path.parent / "crops" / f"vehicle_{plate.vehicle_index}.jpg"
             crop_path.parent.mkdir(parents=True, exist_ok=True)
             if not cv2.imwrite(str(crop_path), crop):
                 raise OSError(f"Could not write crop: {crop_path}")
     ocr_results = run_ocr_on_image_candidates(image_candidates, self.ocr_engine, debug=detailed)
-    ocr_by_index = {candidate.track_id: candidate for candidate in ocr_results}
+    ocr_by_index = {candidate.vehicle_index: candidate for candidate in ocr_results}
     final_rows: list[dict[str, Any]] = []
     postprocess_seconds = 0.0
     for index, vehicle in enumerate(vehicles):
@@ -135,7 +135,7 @@ def run_image(
             _draw_box(
                 annotated,
                 plate.plate_bbox,
-                plate_labels.get(plate.track_id, "unreadable"),
+                plate_labels.get(plate.vehicle_index, "unreadable"),
                 (0, 0, 255),
             )
     plate_calls = self.plate_detector.detect_call_count - plate_calls_before

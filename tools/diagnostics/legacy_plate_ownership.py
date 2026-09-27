@@ -9,7 +9,7 @@ from src.geometry import (
     BBox, bbox_center, bbox_iou, intersection_area as _intersection_area,
     intersection_over_plate_area, point_inside_bbox, valid_bbox as _valid_bbox,
 )
-from src.plate_types import TrackedPlateCandidate
+from src.image.plate_types import ImagePlateCandidate
 
 
 PLATE_DUPLICATE_IOU_THRESHOLD = 0.80
@@ -27,11 +27,11 @@ class PlateOwnershipStats:
 
 @dataclass(frozen=True, slots=True)
 class PlateOwnershipResolution:
-    candidates: tuple[TrackedPlateCandidate, ...]
+    candidates: tuple[ImagePlateCandidate, ...]
     stats: PlateOwnershipStats
 
 
-def _valid_candidate(candidate: TrackedPlateCandidate) -> bool:
+def _valid_candidate(candidate: ImagePlateCandidate) -> bool:
     return (
         _valid_bbox(candidate.plate_bbox)
         and _valid_bbox(candidate.vehicle_bbox)
@@ -41,20 +41,20 @@ def _valid_candidate(candidate: TrackedPlateCandidate) -> bool:
     )
 
 
-def _owner_key(candidate: TrackedPlateCandidate) -> tuple[float, float, float, int]:
+def _owner_key(candidate: ImagePlateCandidate) -> tuple[float, float, float, int]:
     return (
         intersection_over_plate_area(candidate.plate_bbox, candidate.vehicle_bbox),
         candidate.plate_confidence,
         candidate.vehicle_confidence,
-        -candidate.track_id,
+        -candidate.vehicle_index,
     )
 
 
 def resolve_plate_ownership(
-    candidates: list[TrackedPlateCandidate],
+    candidates: list[ImagePlateCandidate],
     duplicate_iou_threshold: float = PLATE_DUPLICATE_IOU_THRESHOLD,
     debug: bool = False,
-) -> list[TrackedPlateCandidate]:
+) -> list[ImagePlateCandidate]:
     """Return valid, unique physical plates for one frame."""
 
     return list(
@@ -67,7 +67,7 @@ def resolve_plate_ownership(
 
 
 def resolve_plate_ownership_detailed(
-    candidates: list[TrackedPlateCandidate],
+    candidates: list[ImagePlateCandidate],
     duplicate_iou_threshold: float = PLATE_DUPLICATE_IOU_THRESHOLD,
     debug: bool = False,
 ) -> PlateOwnershipResolution:
@@ -106,8 +106,8 @@ def resolve_plate_ownership_detailed(
     for first in range(candidate_count):
         for second in range(first + 1, candidate_count):
             if (
-                valid_candidates[first].track_id
-                == valid_candidates[second].track_id
+                valid_candidates[first].vehicle_index
+                == valid_candidates[second].vehicle_index
             ):
                 union(first, second)
                 continue
@@ -120,11 +120,11 @@ def resolve_plate_ownership_detailed(
             ):
                 union(first, second)
 
-    groups: dict[int, list[TrackedPlateCandidate]] = {}
+    groups: dict[int, list[ImagePlateCandidate]] = {}
     for index, candidate in enumerate(valid_candidates):
         groups.setdefault(find(index), []).append(candidate)
 
-    selected: list[TrackedPlateCandidate] = []
+    selected: list[ImagePlateCandidate] = []
     duplicate_groups = 0
     removed_duplicates = 0
     for group in groups.values():
@@ -137,19 +137,19 @@ def resolve_plate_ownership_detailed(
                 print(f"Frame {frame_index}")
                 print("Plate ownership group:")
                 print(f"candidates = {len(group)}")
-                for candidate in sorted(group, key=lambda item: item.track_id):
+                for candidate in sorted(group, key=lambda item: item.vehicle_index):
                     containment = intersection_over_plate_area(
                         candidate.plate_bbox, candidate.vehicle_bbox
                     )
                     print("candidate:")
-                    print(f"  track={candidate.track_id}")
+                    print(f"  track={candidate.vehicle_index}")
                     print(f"  plate_conf={candidate.plate_confidence:.4f}")
                     print(f"  containment={containment:.3f}")
                     print(f"  bbox={list(candidate.plate_bbox)}")
                 print("selected owner:")
-                print(f"  track={owner.track_id}")
+                print(f"  track={owner.vehicle_index}")
 
-    selected.sort(key=lambda candidate: candidate.track_id)
+    selected.sort(key=lambda candidate: candidate.vehicle_index)
     elapsed_ms = (time.perf_counter() - started) * 1000.0
     return PlateOwnershipResolution(
         candidates=tuple(selected),

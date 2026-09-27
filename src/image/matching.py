@@ -1,9 +1,4 @@
-"""IoU costs, score fusion, and Hungarian assignment.
-
-The legacy ``apply_class_gate`` helper remains available for compatibility,
-but the V2.1 tracker core deliberately does not call it: class is an
-attribute, not an identity constraint.
-"""
+"""Geometry matching helpers used by the still-image ownership stage."""
 
 from __future__ import annotations
 

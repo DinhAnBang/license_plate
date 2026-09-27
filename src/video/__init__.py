@@ -1,5 +1,5 @@
-"""Video ALPR pipeline."""
+"""Reserved package for the video pipeline being rebuilt from scratch."""
 
-from .pipeline import run_video
+from .source import VideoFrame, VideoMetadata, VideoReader
 
-__all__ = ["run_video"]
+__all__ = ["VideoFrame", "VideoMetadata", "VideoReader"]

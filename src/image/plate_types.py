@@ -6,9 +6,9 @@ from dataclasses import dataclass
 
 
 @dataclass(frozen=True, slots=True)
-class TrackedPlateCandidate:
+class ImagePlateCandidate:
     frame_index: int
-    track_id: int
+    vehicle_index: int
     vehicle_class_id: int
     vehicle_class_name: str
     vehicle_confidence: float

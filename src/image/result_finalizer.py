@@ -1,10 +1,10 @@
-"""One final public result for every confirmed video track or image vehicle."""
+"""Final public result for one detected image vehicle."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .ocr_fusion import FusedOCRResult
+from ..ocr_fusion import FusedOCRResult
 from .vn_plate_postprocessor import VietnamPlateResult
 
 
@@ -54,8 +54,8 @@ def finalize_vehicle(
     ocr_candidate_count: int,
     low_confidence_threshold: float = 0.50,
 ) -> FinalVehicleResult:
-    if identity_key not in {"track_id", "vehicle_index"}:
-        raise ValueError("identity_key must be track_id or vehicle_index")
+    if identity_key != "vehicle_index":
+        raise ValueError("image identity_key must be vehicle_index")
     confidence = postprocessed.fusion_confidence
     family_mismatch = (
         vehicle_class_name in {"car", "bus", "truck"}
@@ -113,22 +113,4 @@ def finalize_vehicle(
     )
 
 
-class FinalResultCollector:
-    """Store one final result per confirmed video track, including EOF flush."""
-
-    def __init__(self) -> None:
-        self._results: dict[int, FinalVehicleResult] = {}
-
-    def add(self, result: FinalVehicleResult) -> None:
-        if result.identity_key != "track_id":
-            raise ValueError("video finalization requires track_id")
-        if result.identity in self._results:
-            raise ValueError(f"track {result.identity} already finalized")
-        self._results[result.identity] = result
-
-    @property
-    def results(self) -> tuple[FinalVehicleResult, ...]:
-        return tuple(self._results[key] for key in sorted(self._results))
-
-
-__all__ = ["FinalVehicleResult", "FinalResultCollector", "finalize_vehicle"]
+__all__ = ["FinalVehicleResult", "finalize_vehicle"]

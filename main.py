@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 from src.alpr_pipeline import ALPRPipeline, IMAGE_EXTENSIONS, VIDEO_EXTENSIONS
-from src.customer_output import (
+from src.image.customer_output import (
     build_customer_payload,
     write_customer_annotated_image,
     write_customer_json,
@@ -92,7 +92,9 @@ def main(argv: list[str] | None = None) -> int:
         if suffix in IMAGE_EXTENSIONS:
             result = pipeline.process_image(source, **kwargs)
         else:
-            result = pipeline.process_video(source, **kwargs)
+            raise RuntimeError(
+                "Video pipeline is temporarily unavailable while it is being rebuilt."
+            )
         if release_mode:
             assert release_directory is not None
             if suffix in IMAGE_EXTENSIONS:

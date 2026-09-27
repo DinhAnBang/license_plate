@@ -24,7 +24,7 @@ def test_model_and_algorithm_modules_do_not_import_orchestration():
     assert "plate_buffer" not in imports(SRC / "microcharnet_ocr.py")
     assert "ocr_stage" not in imports(SRC / "microcharnet_ocr.py")
     assert "ocr_serialization" not in imports(SRC / "ocr_fusion.py")
-    assert "plate_ownership" not in imports(SRC / "plate_ownership_temporal.py")
+    assert "plate_ownership" not in imports(SRC / "image" / "plate_ownership_temporal.py")
 
 
 def test_production_import_graph_has_no_cycle():
