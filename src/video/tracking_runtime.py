@@ -7,17 +7,15 @@ from dataclasses import dataclass, replace
 
 import numpy as np
 
-from ..vehicle_detector import VehicleDetector
+from ..core.vehicle_detector import VehicleDetector
+from ..config import VehicleTrackingConfig, VehicleValidationConfig
 from .source import VideoReader
 from .tracking import (
     TrackedVehicle,
     VehicleTracker,
-    VehicleTrackingConfig,
 )
-from .vehicle_stage import detect_frame_vehicles
 from .vehicle_validation import (
     ValidatedVehicleDetection,
-    VehicleValidationConfig,
     validate_frame_detections,
 )
 
@@ -81,7 +79,7 @@ def iter_tracked_video_frames(
         for video_frame in reader:
             if max_frames is not None and frames_read >= max_frames:
                 break
-            detections = detect_frame_vehicles(video_frame.image, detector)
+            detections = tuple(detector.detect(video_frame.image))
             validated = validate_frame_detections(
                 detections,
                 frame_width=metadata.width,

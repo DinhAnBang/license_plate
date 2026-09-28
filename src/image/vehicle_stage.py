@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from ..vehicle_detector import VehicleDetection, VehicleDetector
+from ..core.vehicle_detector import VehicleDetection, VehicleDetector
 
 
 def detect_image_vehicles(

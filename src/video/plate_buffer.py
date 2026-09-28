@@ -4,33 +4,16 @@ from __future__ import annotations
 
 from bisect import bisect_right
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import numpy as np
 
-from .plate_quality import VideoPlateQualityMetrics
-from .plate_stage import VideoPlateCandidate
+from ..config import VideoPlateBufferConfig
+from ..core.plate_quality import VideoPlateQualityMetrics
+if TYPE_CHECKING:
+    from .plate_stage import VideoPlateCandidate
 
 
-@dataclass(frozen=True, slots=True)
-class VideoPlateBufferConfig:
-    top_k: int = 4
-    min_frame_gap: int = 5
-    min_quality_score: float = 0.60
-    min_sharpness_score: float = 0.70
-    min_crop_width: int = 40
-    min_crop_height: int = 24
-
-    def __post_init__(self) -> None:
-        if self.top_k < 1:
-            raise ValueError("top_k must be positive")
-        if self.min_frame_gap < 0:
-            raise ValueError("min_frame_gap cannot be negative")
-        if not 0.0 <= self.min_quality_score <= 1.0:
-            raise ValueError("min_quality_score must be between 0 and 1")
-        if not 0.0 <= self.min_sharpness_score <= 1.0:
-            raise ValueError("min_sharpness_score must be between 0 and 1")
-        if self.min_crop_width < 1 or self.min_crop_height < 1:
-            raise ValueError("minimum crop dimensions must be positive")
 
 
 @dataclass(frozen=True, slots=True)

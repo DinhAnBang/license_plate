@@ -3,24 +3,22 @@
 import numpy as np
 import pytest
 
-from src.microcharnet_ocr import (
+from src.core.ocr import (
     MicroCharNetOCR, OCRCharacter, OCRResult, _RawCharacter, _Transform,
     _class_agnostic_nms, _group_and_sort_characters,
 )
 from src.image.customer_output import build_customer_payload
-from src.ocr_fusion import OCRFusionCandidate, fuse_track
-from src.ocr_serialization import build_fused_json, build_ocr_json
-from src.image.ocr_stage import OCRPlateCandidate
-from src.plate_detector import PlateDetection
+from src.core.ocr_fusion import OCRFusionCandidate, fuse_track
+from src.core.plate_detector import PlateDetection
 from src.image.plate_types import ImagePlateCandidate
-from src.geometry import bbox_iou, intersection_over_plate_area
-from tools.diagnostics.legacy_plate_ownership import resolve_plate_ownership
-from src.image.plate_ownership_temporal import TemporalPlateOwnershipResolver
+from src.core.plate_geometry import bbox_iou, intersection_over_plate_area, local_bbox_to_global
+from src.core.plate_quality import PlateQualityConfig, VideoPlateQualityConfig, score_plate_quality
+from src.image.plate_ownership import TemporalPlateOwnershipResolver
 from src.image.plate_stage import detect_vehicle_plates
 from src.image.result_finalizer import finalize_vehicle
 from src.image.result_serialization import serialize_vehicle_result
-from src.image.vn_plate_postprocessor import postprocess_vietnam_plate
-from src.vehicle_detector import VehicleDetection
+from src.core.plate_postprocess import postprocess_vietnam_plate
+from src.core.vehicle_detector import VehicleDetection
 
 
 def plate(vehicle_index=1, frame=0, box=(20, 60, 50, 75), confidence=0.9):
@@ -35,13 +33,34 @@ def plate(vehicle_index=1, frame=0, box=(20, 60, 50, 75), confidence=0.9):
 def test_geometry_and_ownership_snapshot():
     assert bbox_iou((0, 0, 10, 10), (5, 0, 15, 10)) == pytest.approx(1 / 3)
     assert intersection_over_plate_area((0, 0, 10, 10), (0, 0, 5, 10)) == 0.5
-    assert [item.vehicle_index for item in resolve_plate_ownership([
+    assert [item.vehicle_index for item in TemporalPlateOwnershipResolver().resolve(0, [
         plate(1, confidence=0.8), plate(2, confidence=0.9),
-    ])] == [2]
-    assert resolve_plate_ownership([
+    ]).candidates] == [2]
+    assert TemporalPlateOwnershipResolver().resolve(0, [
         plate(1, box=(10, 60, 30, 75), confidence=0.8),
         plate(1, box=(60, 60, 80, 75), confidence=0.9),
-    ])[0].plate_confidence == pytest.approx(0.9)
+    ]).candidates[0].plate_confidence == pytest.approx(0.9)
+
+
+def test_shared_geometry_preserves_image_and_video_clipping_policies():
+    local = (-5, 5, 100, 40)
+    parent = (10, 10, 40, 30)
+    assert local_bbox_to_global(local, parent, 100, 100) == (5, 15, 100, 50)
+    assert local_bbox_to_global(local, parent, 100, 100, clip_to_vehicle=True) == (10, 15, 40, 30)
+
+
+def test_shared_quality_preserves_image_and_video_focus_measurements():
+    import cv2
+
+    rng = np.random.default_rng(42)
+    crop = rng.integers(0, 256, (15, 30, 3), dtype=np.uint8)
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    image = score_plate_quality(crop, 0.8, PlateQualityConfig())
+    video = score_plate_quality(crop, 0.8, VideoPlateQualityConfig())
+    resized = cv2.resize(gray, (128, 64), interpolation=cv2.INTER_CUBIC)
+    assert image.sharpness_raw == pytest.approx(float(cv2.Laplacian(resized, cv2.CV_64F).var()))
+    assert video.sharpness_raw == pytest.approx(float(cv2.Laplacian(gray, cv2.CV_64F).var()))
+    assert image.sharpness_raw != video.sharpness_raw
 
 
 def test_temporal_ownership_keeps_history_and_one_owner():
@@ -335,25 +354,3 @@ def test_fusion_postprocess_and_result_schema_snapshot():
         postprocessed=postprocess_vietnam_plate(""), fusion=None,
         ocr_candidate_count=0,
     ).status == "no_plate"
-
-
-def test_diagnostic_ocr_and_fusion_json_contract():
-    class OCRInfo:
-        model_info = {"model": "fake"}
-        timing_totals = {"total_ms_per_crop": 0.0}
-        inference_count = 1
-        session_init_count = 1
-
-    candidate = OCRPlateCandidate(
-        vehicle_index=1, frame_index=3, rank=1, plate_class_id=1,
-        plate_class_name="dai", plate_confidence=0.9, quality_score=0.8,
-        bbox=(1, 2, 11, 12), raw_text="51A12345", ocr_confidence=0.9,
-        char_confidences=None,
-    )
-    ocr_json = build_ocr_json([candidate], OCRInfo())
-    assert set(ocr_json) == {"status", "ocr_model", "summary", "performance", "tracks"}
-    assert ocr_json["tracks"][0]["candidates"][0]["ocr"]["raw_text"] == "51A12345"
-    from src.ocr_fusion import fuse_candidates
-    fused_json = build_fused_json(ocr_json, fuse_candidates([candidate]))
-    assert fused_json["tracks"][0]["fusion"]["raw_text"] == "51A12345"
-    assert "v6_fusion" in fused_json

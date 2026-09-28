@@ -11,7 +11,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .plate_quality import PlateQualityMetrics
+from ..core.plate_quality import PlateQualityMetrics
 
 
 @dataclass(frozen=True, slots=True)

@@ -6,16 +6,13 @@ from types import SimpleNamespace
 import cv2
 import numpy as np
 
-from src.plate_detector import PlateDetection
-from src.vehicle_detector import VehicleDetection
+from src.core.plate_detector import PlateDetection
+from src.core.vehicle_detector import VehicleDetection
 from src.video.plate_stage import (
     VideoPlateCandidate,
-    VideoPlateDecision,
-    _draw_observation,
     _local_bbox_to_global,
-    resolve_frame_plate_ownership,
-    run_video_plate_detection,
 )
+from src.video.plate_ownership import VideoPlateDecision, resolve_frame_plate_ownership
 from src.video.vehicle_validation import VehicleValidationConfig
 
 
@@ -136,6 +133,17 @@ def test_two_nearby_vehicles_keep_their_own_distinct_plates():
     assert [item.ownership_status for item in decisions] == ["selected", "selected"]
 
 
+def test_video_ownership_threshold_is_applied_without_changing_default():
+    candidates = [
+        _candidate(1, 0.7, (20, 30, 50, 40)),
+        _candidate(2, 0.8, (30, 30, 60, 40)),
+    ]
+    default = resolve_frame_plate_ownership(candidates)
+    tuned = resolve_frame_plate_ownership(candidates, conflict_iou_threshold=0.45)
+    assert [item.ownership_status for item in default] == ["selected", "selected"]
+    assert [item.ownership_status for item in tuned] == ["rejected_conflict", "selected"]
+
+
 def test_clamped_candidate_is_reported_but_never_owned():
     from dataclasses import replace
 
@@ -145,20 +153,6 @@ def test_clamped_candidate_is_reported_but_never_owned():
     )
     decisions = resolve_frame_plate_ownership([candidate])
     assert decisions[0].ownership_status == "rejected_outside_vehicle"
-
-
-def test_annotation_hides_rejected_plate_without_removing_decision():
-    rejected = VideoPlateDecision(
-        _candidate(1, 0.8, (10, 30, 30, 40)), "rejected_conflict", 0, 0.5,
-    )
-    selected = VideoPlateDecision(
-        _candidate(2, 0.9, (55, 30, 75, 40)), "selected", 0, 0.8,
-    )
-    frame = np.zeros((100, 100, 3), dtype=np.uint8)
-    _draw_observation(frame, SimpleNamespace(tracked=()), [rejected, selected])
-    assert np.array_equal(frame[30, 10], [0, 0, 0])
-    assert np.array_equal(frame[30, 55], [0, 0, 255])
-    assert rejected.ownership_status == "rejected_conflict"
 
 
 def test_plate_bbox_is_clamped_inside_vehicle_bbox():
@@ -175,47 +169,3 @@ def test_plate_bbox_is_clamped_inside_vehicle_bbox():
     assert mapped[1] >= 5
     assert mapped[2] <= 30
     assert mapped[3] <= 25
-
-
-def test_video_plate_detection_writes_candidates_and_annotation(tmp_path):
-    source = tmp_path / "source.mp4"
-    _write_video(source)
-    output_dir = tmp_path / "output"
-
-    result = run_video_plate_detection(
-        source,
-        output_dir,
-        vehicle_detector=FakeVehicleDetector(),
-        plate_detector=FakePlateDetector(),
-        validation_config=VehicleValidationConfig(min_confidence=0.50),
-    )
-
-    payload = json.loads((output_dir / "source_plate_detection.json").read_text())
-    assert result["summary"]["frames_read"] == 2
-    assert result["summary"]["raw_plate_candidates"] == 2
-    assert result["summary"]["selected_plate_candidates"] == 2
-    assert payload["frames"][0]["plate_candidates"][0]["track_id"] == 1
-    assert payload["frames"][0]["plate_candidates"][0]["plate_bbox_xyxy"] == [9, 13, 24, 20]
-    assert (output_dir / "source_plate_detection_annotated.mp4").is_file()
-
-
-def test_out_of_roi_plate_is_logged_before_clamp_and_rejected(tmp_path):
-    class OutsidePlateDetector(FakePlateDetector):
-        def detect(self, roi):
-            self.detect_call_count += 1
-            assert roi.shape[:2] == (20, 26)
-            return [PlateDetection(1, "dai", 0.9, (-4, 8, 20, 15))]
-
-    source = tmp_path / "source.mp4"
-    _write_video(source, frame_count=1)
-    result = run_video_plate_detection(
-        source, tmp_path / "out", vehicle_detector=FakeVehicleDetector(),
-        plate_detector=OutsidePlateDetector(),
-        validation_config=VehicleValidationConfig(min_confidence=0.50),
-        save_annotated=False,
-    )
-    plate = result["frames"][0]["plate_candidates"][0]
-    assert plate["plate_bbox_before_clamp_xyxy"] == [0, 13, 24, 20]
-    assert plate["plate_bbox_xyxy"] == [4, 13, 24, 20]
-    assert plate["coordinate_clamped"] is True
-    assert plate["ownership_status"] == "rejected_outside_vehicle"

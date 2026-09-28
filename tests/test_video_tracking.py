@@ -4,9 +4,9 @@ import numpy as np
 import cv2
 import json
 
-from src.vehicle_detector import VehicleDetection
+from src.core.vehicle_detector import VehicleDetection
 from src.video.tracking import VehicleTracker, VehicleTrackingConfig
-from src.video.tracking_stage import run_video_vehicle_tracking
+from src.video.tracking_runtime import iter_tracked_video_frames
 
 
 def detection(x1, y1, x2, y2, class_id=2, name="car", confidence=0.9):
@@ -233,14 +233,11 @@ def test_video_runtime_passes_weak_detections_to_tracker_and_keeps_json_contract
     for _ in range(4):
         writer.write(np.zeros((48, 64, 3), dtype=np.uint8))
     writer.release()
-    output = run_video_vehicle_tracking(
-        video, tmp_path / "tracking", detector=Detector(), save_annotated=False
-    )
-    payload = json.loads((tmp_path / "tracking" / "clip_tracking.json").read_text())
-    assert output["summary"]["unique_track_ids_created"] == 1
-    assert output["summary"]["tracking_counters"]["second_stage_matches"] == 2
-    assert [frame["detections"][0]["track_id"] for frame in payload["frames"]] == [1] * 4
-    assert [frame["detections"][0]["confidence"] for frame in payload["frames"]] == [0.8, 0.3, 0.25, 0.8]
+    observations = list(iter_tracked_video_frames(str(video), detector=Detector()))
+    assert observations[-1].created_track_count == 1
+    assert observations[-1].tracking_counters["second_stage_matches"] == 2
+    assert [frame.tracked[0].track_id for frame in observations] == [1] * 4
+    assert [frame.tracked[0].detection.confidence for frame in observations] == [0.8, 0.3, 0.25, 0.8]
 
 
 def test_different_classes_do_not_share_track():

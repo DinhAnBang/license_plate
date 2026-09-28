@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from ..core.customer_result import is_customer_result
+
 
 def build_video_customer_payload(
     result: dict[str, Any], *, min_confidence: float | None = None,
@@ -16,9 +18,9 @@ def build_video_customer_payload(
     for item in result.get("vehicles", []):
         plate = item["plate"]
         confidence = float(plate["confidence"])
-        if (plate["status"] != "ok" or not plate["format_valid"]
-                or not plate["formatted"]
-                or (min_confidence is not None and confidence < min_confidence)):
+        if not is_customer_result(
+            item, min_confidence=min_confidence, require_formatted=True,
+        ):
             continue
         vehicles.append({
             "track_id": item["track_id"],

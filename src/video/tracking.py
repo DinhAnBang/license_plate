@@ -9,7 +9,9 @@ from typing import Literal, Sequence
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 
-from ..vehicle_detector import VehicleDetection
+from ..config import VehicleTrackingConfig
+from ..core.vehicle_detector import VehicleDetection
+from ..core.plate_geometry import bbox_iou
 from .tracking_kalman import KalmanFilterXYAH, xyah_to_xyxy, xyxy_to_xyah
 
 
@@ -17,52 +19,6 @@ BBox = tuple[int, int, int, int]
 TrackStatus = Literal["active", "lost", "removed"]
 
 
-def bbox_iou(first: Sequence[float], second: Sequence[float]) -> float:
-    ix1, iy1 = max(first[0], second[0]), max(first[1], second[1])
-    ix2, iy2 = min(first[2], second[2]), min(first[3], second[3])
-    overlap = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
-    area_a = max(0.0, first[2] - first[0]) * max(0.0, first[3] - first[1])
-    area_b = max(0.0, second[2] - second[0]) * max(0.0, second[3] - second[1])
-    union = area_a + area_b - overlap
-    return overlap / union if union > 0 else 0.0
-
-
-@dataclass(frozen=True, slots=True)
-class VehicleTrackingConfig:
-    """Detection bands and matching gates; time limits are FPS aware."""
-
-    low_confidence: float = 0.10
-    high_confidence: float = 0.50
-    new_track_confidence: float = 0.55
-    max_lost_seconds: float = 0.50
-    first_match_cost_limit: float = 0.83
-    second_match_cost_limit: float = 0.65
-    min_iou: float = 0.10
-    max_center_distance: float = 0.35
-    class_mismatch_penalty: float = 0.10
-    duplicate_iou_threshold: float = 0.75
-    active_duplicate_iou_threshold: float = 0.90
-    active_duplicate_min_frames: int = 2
-    # Retained for old callers; appearance matching is disabled.
-    archive_seconds: float = 10.0
-    reidentification_similarity: float = 0.80
-    reidentification_min_confidence: float = 0.50
-
-    def __post_init__(self) -> None:
-        if not 0 <= self.low_confidence <= self.high_confidence <= self.new_track_confidence <= 1:
-            raise ValueError("tracking confidence thresholds must satisfy low <= high <= new <= 1")
-        if self.max_lost_seconds <= 0:
-            raise ValueError("max_lost_seconds must be positive")
-        if not 0 < self.first_match_cost_limit <= 1 or not 0 < self.second_match_cost_limit <= 1:
-            raise ValueError("matching cost limits must be in (0, 1]")
-        if not 0 < self.min_iou <= 1 or self.max_center_distance <= 0:
-            raise ValueError("invalid association geometry limits")
-        if not 0 <= self.class_mismatch_penalty < 1:
-            raise ValueError("class_mismatch_penalty must be in [0, 1)")
-        if not 0 < self.duplicate_iou_threshold <= 1:
-            raise ValueError("duplicate_iou_threshold must be in (0, 1]")
-        if not 0 < self.active_duplicate_iou_threshold <= 1 or self.active_duplicate_min_frames < 1:
-            raise ValueError("invalid active duplicate limits")
 
 
 @dataclass(frozen=True, slots=True)

@@ -8,7 +8,7 @@ from pathlib import Path
 
 import cv2
 
-from src.plate_detector import PlateDetection, PlateDetector
+from src.core.plate_detector import PlateDetection, PlateDetector
 
 
 def parse_args() -> argparse.Namespace:

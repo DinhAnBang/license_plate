@@ -9,10 +9,10 @@ import onnxruntime as ort
 
 from .config import PipelineConfig
 from .image.pipeline import run_image
-from .microcharnet_ocr import MicroCharNetOCR
-from .plate_detector import PlateDetector
+from .core.ocr import MicroCharNetOCR
+from .core.plate_detector import PlateDetector
 from .paths import application_directory
-from .vehicle_detector import VehicleDetector
+from .core.vehicle_detector import VehicleDetector
 
 
 IMAGE_EXTENSIONS = frozenset({".jpg", ".jpeg", ".png", ".bmp", ".webp"})

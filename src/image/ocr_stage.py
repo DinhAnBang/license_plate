@@ -6,7 +6,7 @@ import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from ..microcharnet_ocr import MicroCharNetOCR
+from ..core.ocr import MicroCharNetOCR
 from .plate_buffer import BufferedPlateCandidate
 
 LOGGER = logging.getLogger(__name__)

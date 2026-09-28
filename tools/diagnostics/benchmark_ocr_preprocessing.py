@@ -12,7 +12,7 @@ from pathlib import Path
 
 import cv2
 
-from src.microcharnet_ocr import MicroCharNetOCR
+from src.core.ocr import MicroCharNetOCR
 
 
 def main() -> None:

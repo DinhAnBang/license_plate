@@ -1,6 +1,5 @@
-"""Stateful V3.2 plate ownership using relative geometry and history.
+"""Stateful image plate ownership using relative geometry and history.
 
-V3.1 remains in diagnostics for regression comparison.
 This resolver consumes raw per-track plate candidates, resolves one frame at a
 time, and updates bounded history only from trusted ownership decisions.
 """
@@ -15,8 +14,9 @@ from typing import Iterable, Sequence
 
 import numpy as np
 
+from ..config import TemporalPlateOwnershipConfig
 from .plate_types import ImagePlateCandidate
-from ..geometry import (
+from ..core.plate_geometry import (
     intersection_area as _intersection_area,
     bbox_center,
     bbox_iou,
@@ -41,79 +41,6 @@ class RelativePlateGeometry:
     relative_area: float
 
 
-@dataclass(frozen=True, slots=True)
-class TemporalPlateOwnershipConfig:
-    history_size: int = 20
-    min_history_samples: int = 5
-    definite_duplicate_iou_threshold: float = 0.80
-    ownership_conflict_iou_threshold: float = 0.70
-    overlap_over_smaller_threshold: float = 0.85
-    temporal_weight: float = 0.40
-    tight_parent_weight: float = 0.25
-    containment_weight: float = 0.15
-    plate_conf_weight: float = 0.15
-    vehicle_conf_weight: float = 0.05
-    cold_start_temporal_score: float = 0.50
-    min_history_update_margin: float = 0.10
-    center_x_tolerance: float = 0.20
-    center_y_tolerance: float = 0.20
-    relative_width_tolerance: float = 0.50
-    relative_height_tolerance: float = 0.50
-    minimum_center_scale: float = 0.05
-    minimum_relative_size_scale: float = 0.05
-    min_temporal_accept_score: float = 0.20
-    max_center_jump: float = 0.25
-    max_relative_size_ratio: float = 2.50
-
-    def __post_init__(self) -> None:
-        if self.history_size < 1:
-            raise ValueError("history_size must be >= 1")
-        if self.min_history_samples < 1:
-            raise ValueError("min_history_samples must be >= 1")
-        if self.min_history_samples > self.history_size:
-            raise ValueError("min_history_samples cannot exceed history_size")
-        for name in (
-            "definite_duplicate_iou_threshold",
-            "ownership_conflict_iou_threshold",
-            "overlap_over_smaller_threshold",
-        ):
-            value = float(getattr(self, name))
-            if not 0.0 < value <= 1.0:
-                raise ValueError(f"{name} must be in (0, 1]")
-        if self.ownership_conflict_iou_threshold > self.definite_duplicate_iou_threshold:
-            raise ValueError(
-                "ownership_conflict_iou_threshold cannot exceed "
-                "definite_duplicate_iou_threshold"
-            )
-        weights = (
-            self.temporal_weight,
-            self.tight_parent_weight,
-            self.containment_weight,
-            self.plate_conf_weight,
-            self.vehicle_conf_weight,
-        )
-        if any(weight < 0.0 for weight in weights):
-            raise ValueError("owner score weights cannot be negative")
-        if not np.isclose(sum(weights), 1.0):
-            raise ValueError("owner score weights must sum to 1")
-        for name in (
-            "cold_start_temporal_score",
-            "min_history_update_margin",
-            "center_x_tolerance",
-            "center_y_tolerance",
-            "relative_width_tolerance",
-            "relative_height_tolerance",
-            "minimum_center_scale",
-            "minimum_relative_size_scale",
-            "min_temporal_accept_score",
-            "max_center_jump",
-        ):
-            if float(getattr(self, name)) < 0.0:
-                raise ValueError(f"{name} cannot be negative")
-        if self.min_temporal_accept_score > 1.0:
-            raise ValueError("min_temporal_accept_score must be <= 1")
-        if not np.isfinite(self.max_relative_size_ratio) or self.max_relative_size_ratio < 1.0:
-            raise ValueError("max_relative_size_ratio must be finite and >= 1")
 
 
 @dataclass(frozen=True, slots=True)

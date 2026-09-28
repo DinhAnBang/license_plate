@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ..ocr_fusion import FusedOCRResult
-from .vn_plate_postprocessor import VietnamPlateResult
+from ..core.ocr_fusion import FusedOCRResult
+from ..core.plate_postprocess import VietnamPlateResult
+from ..core.status import missing_evidence_status
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,11 +66,9 @@ def finalize_vehicle(
     format_reason = postprocessed.format_reason
     if family_mismatch:
         format_reason = "vehicle_plate_family_mismatch"
-    if plate_observation_count <= 0:
-        status = "no_plate"
-        status_reason = None
-    elif not postprocessed.raw_text:
-        status = "no_ocr"
+    missing = missing_evidence_status(plate_observation_count, bool(postprocessed.raw_text))
+    if missing is not None:
+        status = missing
         status_reason = None
     elif family_mismatch:
         status = "low_confidence"

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ..image.vn_plate_postprocessor import (
+from ..core.plate_postprocess import (
     VietnamPlateResult, VietnamPostprocessConfig,
     postprocess_vietnam_plate, preferred_family_for_vehicle_class,
 )

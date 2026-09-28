@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from ..microcharnet_ocr import MicroCharNetOCR
-from ..ocr_fusion import OCRFusionCandidate
+from ..core.ocr import MicroCharNetOCR
+from ..core.ocr_fusion import OCRFusionCandidate
 from .plate_buffer import VideoPlateBuffer
 
 

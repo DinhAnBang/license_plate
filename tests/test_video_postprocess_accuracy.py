@@ -6,7 +6,6 @@ from unittest.mock import patch
 import pytest
 
 from src.video.postprocess_stage import postprocess_video_fused
-from tools.diagnostics.run_video_postprocess_accuracy import run_video_postprocess_accuracy
 
 
 @pytest.mark.parametrize("raw, expected", [
@@ -113,66 +112,3 @@ def test_too_many_position_corrections_are_not_formatted():
     assert not result.valid and result.formatted_text is None
     assert result.status == "low_format_confidence"
     assert result.reason == "too_many_position_corrections"
-
-
-def test_diagnostic_reuses_adapter_and_keeps_empty_track(tmp_path):
-    fusion = tmp_path / "fusion.json"
-    fusion.write_text(json.dumps({"tracks": [
-        {"track_id": 2, "raw_text": "72a16231", "confidence": 0.8,
-         "method": "weighted_exact_vote"},
-        {"track_id": 4, "raw_text": None, "confidence": 0.0,
-         "method": "no_valid_ocr"},
-    ]}), encoding="utf-8")
-    topk = tmp_path / "topk.json"
-    topk.write_text(json.dumps({"frames": [{"vehicles": [
-        {"track_id": 2, "class_name": "car"},
-        {"track_id": 4, "class_name": "car"},
-    ]}]}), encoding="utf-8")
-    output = tmp_path / "postprocess"
-    summary = run_video_postprocess_accuracy(fusion, topk, output)
-    assert summary["tracks_total"] == 2
-    assert summary["tracks_with_ocr"] == summary["structurally_valid"] == 1
-    assert summary["no_ocr"] == 1
-    report2 = json.loads((output / "track_2/report.json").read_text(encoding="utf-8"))
-    report4 = json.loads((output / "track_4/report.json").read_text(encoding="utf-8"))
-    assert report2["raw_text"] == "72a16231"
-    assert report2["normalized_text"] == "72A16231"
-    assert report2["corrections"] == []
-    assert report2["format_family"] == "car_common"
-    assert report2["formatted"] == "72A-162.31"
-    assert report4["status"] == "no_ocr" and report4["formatted"] is None
-    assert (output / "summary.md").is_file()
-
-
-def test_diagnostic_rejects_conflicting_vehicle_classes(tmp_path):
-    fusion = tmp_path / "fusion.json"
-    fusion.write_text(json.dumps({"tracks": [
-        {"track_id": 2, "raw_text": "72a16231", "confidence": 0.8,
-         "method": "single_candidate"},
-    ]}), encoding="utf-8")
-    topk = tmp_path / "topk.json"
-    topk.write_text(json.dumps({"frames": [
-        {"vehicles": [{"track_id": 2, "class_name": "car"}]},
-        {"vehicles": [{"track_id": 2, "class_name": "motorcycle"}]},
-    ]}), encoding="utf-8")
-    with pytest.raises(ValueError, match="Inconsistent vehicle families"):
-        run_video_postprocess_accuracy(fusion, topk, tmp_path / "output")
-
-
-def test_diagnostic_records_class_drift_within_same_plate_family(tmp_path):
-    fusion = tmp_path / "fusion.json"
-    fusion.write_text(json.dumps({"tracks": [
-        {"track_id": 1, "raw_text": "51b77569", "confidence": 0.7,
-         "method": "single_candidate"},
-    ]}), encoding="utf-8")
-    topk = tmp_path / "topk.json"
-    topk.write_text(json.dumps({"frames": [
-        {"vehicles": [{"track_id": 1, "class_name": name}]}
-        for name in ("car", "truck", "car")
-    ]}), encoding="utf-8")
-    output = tmp_path / "output"
-    run_video_postprocess_accuracy(fusion, topk, output)
-    report = json.loads((output / "track_1/report.json").read_text(encoding="utf-8"))
-    assert report["vehicle_class_name"] == "car"
-    assert report["vehicle_class_counts"] == {"car": 2, "truck": 1}
-    assert report["format_family"] == "car_common"

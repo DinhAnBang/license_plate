@@ -9,7 +9,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from src.vehicle_detector import VehicleDetection, VehicleDetector
+from src.core.vehicle_detector import VehicleDetection, VehicleDetector
 
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}

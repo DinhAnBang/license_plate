@@ -9,15 +9,16 @@ from typing import Any
 import cv2
 
 from .ocr_stage import run_ocr_on_image_candidates
-from .pipeline_support import _debug_ocr, _draw_box, _ms, _plate_display_label, _write_json
+from .pipeline_support import _debug_ocr, _ms, _write_json
+from .renderer import draw_box as _draw_box, plate_display_label as _plate_display_label
 from .plate_buffer import BufferedPlateCandidate
-from .plate_ownership_temporal import TemporalPlateOwnershipResolver
-from .plate_quality import crop_plate_from_frame, score_plate_quality
+from .plate_ownership import TemporalPlateOwnershipResolver
+from ..core.plate_quality import crop_plate_from_frame, score_plate_quality
 from .plate_stage import buffered_plate_candidate, detect_vehicle_plates
 from .plate_types import ImagePlateCandidate
 from .result_finalizer import finalize_vehicle
 from .result_serialization import serialize_vehicle_result
-from .vn_plate_postprocessor import (
+from ..core.plate_postprocess import (
     postprocess_vietnam_plate,
     preferred_family_for_vehicle_class,
 )
@@ -63,7 +64,7 @@ def run_image(
                 image, vehicle, vehicle_index, self.plate_detector, 0,
             )
         )
-    owner = TemporalPlateOwnershipResolver(self.config.ownership)
+    owner = TemporalPlateOwnershipResolver(self.config.image.ownership)
     stage = time.perf_counter()
     resolution = owner.resolve(0, raw)
     ownership_seconds = time.perf_counter() - stage
@@ -75,7 +76,7 @@ def run_image(
         if crop is None:
             continue
         stage = time.perf_counter()
-        quality = score_plate_quality(crop, plate.plate_confidence, self.config.quality)
+        quality = score_plate_quality(crop, plate.plate_confidence, self.config.image.quality)
         quality_seconds += time.perf_counter() - stage
         image_candidates.append(buffered_plate_candidate(plate, crop, quality))
         if save_topk_crops:

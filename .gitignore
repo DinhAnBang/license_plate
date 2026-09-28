@@ -24,3 +24,4 @@ venv_runtime/
 build/
 dist/
 *.egg-info/
+*.log

@@ -2,20 +2,22 @@
 
 import json
 from collections import Counter
+from dataclasses import replace
 from types import SimpleNamespace
 
 import cv2
 import numpy as np
 import pytest
 
+import src.video.pipeline as video_pipeline
 from src.alpr_pipeline import ALPRPipeline
 from src.config import PipelineConfig
-from src.microcharnet_ocr import OCRResult
-from src.ocr_fusion import OCRFusionCandidate, fuse_candidates
-from src.plate_detector import PlateDetection
-from src.vehicle_detector import VehicleDetection
+from src.core.ocr import OCRResult
+from src.core.ocr_fusion import OCRFusionCandidate, fuse_candidates
+from src.core.plate_detector import PlateDetection
+from src.core.vehicle_detector import VehicleDetection
 from src.video.customer_output import build_video_customer_payload
-from src.video.render import plate_label, render_video_frame
+from src.video.renderer import plate_label, render_video_frame
 from src.video.result_finalizer import finalize_video_tracks
 
 
@@ -214,6 +216,91 @@ def test_production_two_pass_end_to_end_does_not_rerun_models(tmp_path):
         frames += 1
     capture.release()
     assert frames == 3
+
+
+@pytest.mark.parametrize("top_k,min_crop_width,expected", [(2, 40, 2), (4, 81, 0)])
+def test_video_topk_config_reaches_production_pipeline(tmp_path, top_k, min_crop_width, expected):
+    source = tmp_path / "source.mp4"
+    writer = cv2.VideoWriter(str(source), cv2.VideoWriter_fourcc(*"mp4v"),
+                             10.0, (160, 120))
+    assert writer.isOpened()
+    rng = np.random.default_rng(2026)
+    for _ in range(3):
+        writer.write(rng.integers(50, 220, (120, 160, 3), dtype=np.uint8))
+    writer.release()
+
+    plate = _PlateDetector()
+    plate.detect = lambda _roi: [PlateDetection(0, "vuong", 0.91, (30, 40, 110, 75))]
+    ocr = _OCR()
+    base = PipelineConfig()
+    topk = replace(base.video.topk, top_k=top_k, min_frame_gap=0,
+                   min_crop_width=min_crop_width)
+    config = replace(base, video=replace(base.video, topk=topk))
+    pipeline = ALPRPipeline(config=config, vehicle_detector=_VehicleDetector(),
+                            plate_detector=plate, ocr_engine=ocr)
+    result = pipeline.process_video(source, output=tmp_path / "result.json",
+                                    save_annotated=False)
+    assert result["vehicles"][0]["evidence"]["topk_selected"] == expected
+    assert ocr.calls == expected
+
+
+def test_video_validation_tracking_quality_and_ownership_config_reach_production(
+    tmp_path, monkeypatch,
+):
+    source = tmp_path / "source.mp4"
+    writer = cv2.VideoWriter(str(source), cv2.VideoWriter_fourcc(*"mp4v"),
+                             10.0, (160, 120))
+    assert writer.isOpened()
+    rng = np.random.default_rng(2026)
+    for _ in range(3):
+        writer.write(rng.integers(50, 220, (120, 160, 3), dtype=np.uint8))
+    writer.release()
+
+    base = PipelineConfig()
+    video = replace(
+        base.video,
+        validation=replace(base.video.validation, min_width_pixels=9),
+        tracking=replace(base.video.tracking, max_lost_seconds=0.60),
+        quality=replace(base.video.quality, sharpness_reference=210.0),
+        topk=replace(base.video.topk, top_k=2, min_frame_gap=0),
+        ownership=replace(base.video.ownership, conflict_iou_threshold=0.66,
+                          overlap_over_smaller_threshold=0.86),
+    )
+    seen = {}
+    original_iter = video_pipeline.iter_tracked_video_frames
+    original_resolve = video_pipeline.resolve_frame_plate_ownership
+    original_score = video_pipeline.score_plate_quality
+
+    def capture_iter(*args, **kwargs):
+        seen["validation"] = kwargs["validation_config"]
+        seen["tracking"] = kwargs["tracking_config"]
+        yield from original_iter(*args, **kwargs)
+
+    def capture_resolve(candidates, **kwargs):
+        seen["ownership"] = kwargs
+        return original_resolve(candidates, **kwargs)
+
+    def capture_score(crop, confidence, quality_config):
+        seen["quality"] = quality_config
+        return original_score(crop, confidence, quality_config)
+
+    monkeypatch.setattr(video_pipeline, "iter_tracked_video_frames", capture_iter)
+    monkeypatch.setattr(video_pipeline, "resolve_frame_plate_ownership", capture_resolve)
+    monkeypatch.setattr(video_pipeline, "score_plate_quality", capture_score)
+    pipeline = ALPRPipeline(
+        config=replace(base, video=video), vehicle_detector=_VehicleDetector(),
+        plate_detector=_PlateDetector(), ocr_engine=_OCR(),
+    )
+    result = pipeline.process_video(source, output=tmp_path / "result.json",
+                                    save_annotated=False)
+    assert seen["validation"] is video.validation
+    assert seen["tracking"] is video.tracking
+    assert seen["quality"] is video.quality
+    assert seen["ownership"] == {
+        "conflict_iou_threshold": video.ownership.conflict_iou_threshold,
+        "overlap_over_smaller_threshold": video.ownership.overlap_over_smaller_threshold,
+    }
+    assert result["vehicles"][0]["evidence"]["topk_selected"] == 2
 
 
 def test_main_cli_routes_video_to_production_pipeline(tmp_path, monkeypatch):

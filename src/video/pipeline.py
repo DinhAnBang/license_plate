@@ -9,12 +9,13 @@ from typing import Any
 
 import cv2
 
-from ..ocr_fusion import fuse_candidates
+from ..core.ocr_fusion import fuse_candidates
 from .ocr_stage import recognize_video_topk
 from .plate_buffer import VideoBufferedPlate, VideoPlateBuffer
-from .plate_quality import crop_plate_from_frame, score_plate_quality
-from .plate_stage import detect_frame_plate_candidates, resolve_frame_plate_ownership
-from .render import write_annotated_video
+from ..core.plate_quality import crop_plate_from_frame, score_plate_quality
+from .plate_stage import detect_frame_plate_candidates
+from .plate_ownership import resolve_frame_plate_ownership
+from .renderer import write_annotated_video
 from .result_finalizer import finalize_video_tracks
 from .tracking_runtime import TrackedVideoObservation, iter_tracked_video_frames
 
@@ -33,7 +34,7 @@ def run_video(
     output_path = pipeline._output_path(source, output)
     artifact_stem = pipeline._artifact_stem(source, output_path, output)
     detailed = pipeline.debug if debug is None else debug
-    buffer = VideoPlateBuffer()
+    buffer = VideoPlateBuffer(pipeline.config.video.topk)
     frames: list[dict[str, object]] = []
     class_votes: dict[int, Counter[str]] = defaultdict(Counter)
     plate_observations: Counter[int] = Counter()
@@ -44,6 +45,8 @@ def run_video(
 
     for observation in iter_tracked_video_frames(
         str(source), detector=pipeline.vehicle_detector,
+        validation_config=pipeline.config.video.validation,
+        tracking_config=pipeline.config.video.tracking,
     ):
         last = observation
         raw_vehicle_detections += len(observation.validated)
@@ -57,7 +60,9 @@ def run_video(
                 "bbox_xyxy": list(tracked.detection.bbox),
             })
         decisions = resolve_frame_plate_ownership(
-            detect_frame_plate_candidates(observation, pipeline.plate_detector)
+            detect_frame_plate_candidates(observation, pipeline.plate_detector),
+            conflict_iou_threshold=pipeline.config.video.ownership.conflict_iou_threshold,
+            overlap_over_smaller_threshold=pipeline.config.video.ownership.overlap_over_smaller_threshold,
         )
         raw_plate_candidates += len(decisions)
         plates: list[dict[str, object]] = []
@@ -77,7 +82,9 @@ def run_video(
             crop = crop_plate_from_frame(observation.image, candidate.plate_bbox)
             if crop is None:
                 continue
-            quality = score_plate_quality(crop, candidate.plate_confidence)
+            quality = score_plate_quality(
+                crop, candidate.plate_confidence, pipeline.config.video.quality,
+            )
             buffer.add(VideoBufferedPlate(candidate, quality, crop))
         frames.append({
             "frame_index": observation.frame_index,

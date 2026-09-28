@@ -7,14 +7,12 @@ import cv2
 import numpy as np
 import pytest
 
-from src.plate_detector import PlateDetection
-from src.vehicle_detector import VehicleDetection
+from src.core.plate_detector import PlateDetection
+from src.core.vehicle_detector import VehicleDetection
 from src.video.plate_buffer import VideoBufferedPlate, VideoPlateBuffer, VideoPlateBufferConfig
-from src.video.plate_buffer_stage import run_video_plate_buffer
-from src.video.plate_quality import VideoPlateQualityMetrics, crop_plate_from_frame, score_plate_quality
+from src.core.plate_quality import VideoPlateQualityConfig, VideoPlateQualityMetrics, crop_plate_from_frame, score_plate_quality
 from src.video.plate_stage import VideoPlateCandidate
 from src.video.vehicle_validation import VehicleValidationConfig
-from tools.diagnostics.run_video_plate_accuracy import build_accuracy_review
 
 
 def _candidate(frame_index: int, candidate_index: int = 0) -> VideoPlateCandidate:
@@ -129,8 +127,8 @@ def test_quality_score_uses_original_focus_information():
     sharp[:, ::4] = 255
     blurred = cv2.GaussianBlur(sharp, (15, 15), 0)
 
-    sharp_metrics = score_plate_quality(sharp, 0.8)
-    blurred_metrics = score_plate_quality(blurred, 0.8)
+    sharp_metrics = score_plate_quality(sharp, 0.8, VideoPlateQualityConfig())
+    blurred_metrics = score_plate_quality(blurred, 0.8, VideoPlateQualityConfig())
 
     assert sharp_metrics.sharpness_raw > blurred_metrics.sharpness_raw
     assert sharp_metrics.sharpness_score > blurred_metrics.sharpness_score
@@ -145,77 +143,3 @@ def test_crop_is_exact_bbox_and_invalid_coordinates_return_none():
     assert not np.array_equal(crop, frame[1:5, 2:6])
     assert crop_plate_from_frame(frame, (-1, 1, 6, 5)) is None
     assert crop_plate_from_frame(frame, (2, 1, 9, 5)) is None
-
-
-class FakeVehicleDetector:
-    model_path = "fake-vehicle.onnx"
-    confidence_threshold = 0.10
-
-    def __init__(self):
-        self.detect_call_count = 0
-
-    def detect(self, _frame):
-        self.detect_call_count += 1
-        return [VehicleDetection(2, "car", 0.90, (4, 5, 30, 25))]
-
-
-class FakePlateDetector:
-    model_path = "fake-plate.onnx"
-    confidence_threshold = 0.25
-
-    def __init__(self):
-        self.detect_call_count = 0
-
-    def detect(self, _vehicle_roi):
-        self.detect_call_count += 1
-        return [PlateDetection(1, "dai", 0.88, (5, 8, 20, 15))]
-
-
-def _write_video(path, frame_count=3):
-    writer = cv2.VideoWriter(
-        str(path), cv2.VideoWriter_fourcc(*"mp4v"), 10.0, (64, 48),
-    )
-    assert writer.isOpened()
-    for _ in range(frame_count):
-        writer.write(np.zeros((48, 64, 3), dtype=np.uint8))
-    writer.release()
-
-
-def test_video_plate_buffer_writes_topk_crops(tmp_path):
-    source = tmp_path / "source.mp4"
-    _write_video(source)
-    output_dir = tmp_path / "output"
-
-    result = run_video_plate_buffer(
-        source,
-        output_dir,
-        vehicle_detector=FakeVehicleDetector(),
-        plate_detector=FakePlateDetector(),
-        validation_config=VehicleValidationConfig(min_confidence=0.50),
-        buffer_config=VideoPlateBufferConfig(
-            top_k=4,
-            min_frame_gap=1,
-            min_quality_score=0.0,
-            min_sharpness_score=0.0,
-            min_crop_width=1,
-            min_crop_height=1,
-        ),
-    )
-
-    payload = json.loads((output_dir / "source_plate_topk.json").read_text())
-    assert result["summary"]["frames_read"] == 3
-    assert result["summary"]["raw_plate_candidates"] == 3
-    assert payload["tracks"][0]["track_id"] == 1
-    assert payload["tracks"][0]["selected_count"] == 3
-    assert len(list((output_dir / "crops" / "track_1").glob("*.jpg"))) == 3
-    assert all(
-        candidate["topk_status"] == "retained"
-        and candidate["stages"][-1] == "TOPK_RETAINED"
-        and candidate["final_rejection_reason"] is None
-        for frame in payload["frames"] for candidate in frame["plate_candidates"]
-    )
-    assert (output_dir / "source_plate_topk_annotated.mp4").is_file()
-    review = build_accuracy_review(source, result, tmp_path / "accuracy")
-    assert review["tracks"][0]["candidate_count"] == 3
-    assert (tmp_path / "accuracy" / "track_1" / "topk_montage.jpg").is_file()
-    assert len(list((tmp_path / "accuracy" / "track_1" / "candidates").glob("*.jpg"))) == 3

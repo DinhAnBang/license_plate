@@ -1,13 +1,16 @@
 """End-to-end image contract with deterministic in-memory model doubles."""
 
+from dataclasses import replace
+
 import cv2
 import numpy as np
 
 import src.image.pipeline as image_pipeline
 from src.alpr_pipeline import ALPRPipeline
-from src.microcharnet_ocr import OCRResult
-from src.plate_detector import PlateDetection
-from src.vehicle_detector import VehicleDetection
+from src.config import PipelineConfig
+from src.core.ocr import OCRResult
+from src.core.plate_detector import PlateDetection
+from src.core.vehicle_detector import VehicleDetection
 
 
 class VehicleModel:
@@ -139,3 +142,35 @@ def test_image_pipeline_preserves_low_confidence_vehicle(tmp_path):
         "successful_results": 0,
     }
     assert result["vehicles"][0]["plate"]["status"] == "low_confidence"
+
+
+def test_image_quality_and_ownership_config_reach_production(tmp_path, monkeypatch):
+    source = tmp_path / "image.jpg"
+    cv2.imwrite(str(source), np.full((100, 120, 3), 180, dtype=np.uint8))
+    base = PipelineConfig()
+    image = replace(
+        base.image,
+        quality=replace(base.image.quality, target_plate_height=96),
+        ownership=replace(base.image.ownership, history_size=21),
+    )
+    config = replace(base, image=image)
+    seen = {}
+    original_score = image_pipeline.score_plate_quality
+    original_resolver = image_pipeline.TemporalPlateOwnershipResolver
+
+    def capture_score(crop, confidence, quality_config):
+        seen["quality"] = quality_config
+        return original_score(crop, confidence, quality_config)
+
+    def capture_resolver(ownership_config):
+        seen["ownership"] = ownership_config
+        return original_resolver(ownership_config)
+
+    monkeypatch.setattr(image_pipeline, "score_plate_quality", capture_score)
+    monkeypatch.setattr(image_pipeline, "TemporalPlateOwnershipResolver", capture_resolver)
+    pipeline = ALPRPipeline(
+        config=config, vehicle_detector=VehicleModel(), plate_detector=PlateModel(),
+        ocr_engine=OCRModel(), device="cpu",
+    )
+    pipeline.process_image(source, output=tmp_path / "result.json")
+    assert seen == {"quality": image.quality, "ownership": image.ownership}

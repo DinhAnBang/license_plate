@@ -1,8 +1,9 @@
-"""Explainable plate crop quality scoring for the V4 temporal buffer."""
+"""Explainable plate crop quality scoring for image and video plates."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 import cv2
 import numpy as np
@@ -21,6 +22,7 @@ class PlateQualityConfig:
     normalized_sharpness_height: int = 64
     dark_clip_value: int = 3
     bright_clip_value: int = 252
+    sharpness_mode: Literal["normalized", "original"] = "normalized"
 
     def __post_init__(self) -> None:
         weights = (
@@ -45,6 +47,15 @@ class PlateQualityConfig:
             raise ValueError("bright_clip_value must be in [0, 255]")
         if self.dark_clip_value >= self.bright_clip_value:
             raise ValueError("dark_clip_value must be less than bright_clip_value")
+        if self.sharpness_mode not in ("normalized", "original"):
+            raise ValueError("sharpness_mode must be normalized or original")
+
+
+@dataclass(frozen=True, slots=True)
+class VideoPlateQualityConfig(PlateQualityConfig):
+    """Keep the video's existing original-pixel focus measurement."""
+
+    sharpness_mode: Literal["normalized", "original"] = "original"
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,6 +68,9 @@ class PlateQualityMetrics:
     size_score: float
     exposure_score: float
     total_score: float
+
+
+VideoPlateQualityMetrics = PlateQualityMetrics
 
 
 def crop_plate_from_frame(
@@ -108,15 +122,17 @@ def score_plate_quality(
         raise ValueError("plate_crop dimensions must be greater than zero")
     gray = cv2.cvtColor(plate_crop, cv2.COLOR_BGR2GRAY)
 
-    normalized_height = config.normalized_sharpness_height
-    normalized_width = max(1, int(round(width * normalized_height / height)))
-    interpolation = cv2.INTER_AREA if normalized_height < height else cv2.INTER_CUBIC
-    normalized = cv2.resize(
-        gray,
-        (normalized_width, normalized_height),
-        interpolation=interpolation,
-    )
-    sharpness_raw = float(cv2.Laplacian(normalized, cv2.CV_64F).var())
+    focus_image = gray
+    if config.sharpness_mode == "normalized":
+        normalized_height = config.normalized_sharpness_height
+        normalized_width = max(1, int(round(width * normalized_height / height)))
+        interpolation = cv2.INTER_AREA if normalized_height < height else cv2.INTER_CUBIC
+        focus_image = cv2.resize(
+            gray,
+            (normalized_width, normalized_height),
+            interpolation=interpolation,
+        )
+    sharpness_raw = float(cv2.Laplacian(focus_image, cv2.CV_64F).var())
     sharpness_score = float(
         np.clip(sharpness_raw / config.sharpness_reference, 0.0, 1.0)
     )

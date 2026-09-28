@@ -12,9 +12,9 @@ from pathlib import Path
 from src.alpr_pipeline import ALPRPipeline, IMAGE_EXTENSIONS, VIDEO_EXTENSIONS
 from src.image.customer_output import (
     build_customer_payload,
-    write_customer_annotated_image,
     write_customer_json,
 )
+from src.image.renderer import write_customer_annotated_image
 from src.paths import application_directory
 from src.video.customer_output import build_video_customer_payload, write_video_customer_json
 

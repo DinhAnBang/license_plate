@@ -6,11 +6,10 @@ import cv2
 import numpy as np
 import pytest
 
-from src.microcharnet_ocr import (
+from src.core.ocr import (
     MicroCharNetOCR, OCRCharacter, OutputFormat, _OCRCounters, _RawCharacter,
     _Transform, _class_agnostic_nms, _group_and_sort_characters,
 )
-from tools.diagnostics.run_video_ocr_accuracy import run_video_ocr_accuracy
 
 
 def _decoder(names=("A", "B"), threshold=0.25, iou=0.70):
@@ -167,30 +166,3 @@ def test_raw_fallback_trace_uses_same_filter_and_nms():
     assert result.text == "A"
     assert (trace["raw_character_count"], trace["after_confidence_count"],
             trace["after_nms_count"]) == (2, 1, 1)
-
-
-def test_diagnostic_writes_one_crop_and_no_eligible_track(tmp_path):
-    video = tmp_path / "source.mp4"
-    writer = cv2.VideoWriter(str(video), cv2.VideoWriter_fourcc(*"mp4v"), 10, (64, 48))
-    assert writer.isOpened()
-    writer.write(np.full((48, 64, 3), 150, dtype=np.uint8))
-    writer.release()
-    topk = tmp_path / "topk.json"
-    topk.write_text(json.dumps({"tracks": [
-        {"track_id": 1, "all_evidence_count": 1, "eligible_evidence_count": 1,
-         "top_k": [{"rank": 1, "frame_index": 0, "plate_bbox_xyxy": [4, 5, 44, 30],
-                    "plate_class_name": "vuong", "plate_confidence": 0.8,
-                    "quality": {"width": 40, "height": 25, "total_score": 0.8,
-                                "sharpness_score": 0.7, "size_score": 0.6,
-                                "exposure_score": 0.9}}]},
-        {"track_id": 2, "all_evidence_count": 3, "eligible_evidence_count": 0,
-         "top_k": []},
-    ]}), encoding="utf-8")
-    summary = run_video_ocr_accuracy(topk, video, tmp_path / "review")
-    assert len(summary["tracks"][0]["crops"]) == 1
-    result = json.loads((tmp_path / "review/track_1/crop_1/result.json").read_text())
-    assert result["ocr"]["final_character_count"] == len(result["characters"])
-    assert (tmp_path / "review/track_1/crop_1/preprocessed.jpg").is_file()
-    assert (tmp_path / "review/track_1/crop_1/characters.jpg").is_file()
-    assert (tmp_path / "review/track_2/no_eligible_crop.json").is_file()
-    assert (tmp_path / "review/summary.md").is_file()

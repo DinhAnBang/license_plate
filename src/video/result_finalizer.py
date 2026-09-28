@@ -6,7 +6,8 @@ from collections import Counter
 from collections.abc import Mapping
 
 from ..config import PipelineConfig
-from ..ocr_fusion import OCRFusionReport
+from ..core.ocr_fusion import OCRFusionReport
+from ..core.status import missing_evidence_status
 from .plate_buffer import VideoPlateBuffer
 from .postprocess_stage import postprocess_video_fused
 
@@ -36,10 +37,9 @@ def finalize_video_tracks(
         )
         normalized = post.postprocessed
         observation_count = int(plate_observations.get(track_id, 0))
-        if observation_count == 0:
-            status, reason = "no_plate", None
-        elif post.status == "no_ocr":
-            status, reason = "no_ocr", post.reason
+        missing = missing_evidence_status(observation_count, post.status != "no_ocr")
+        if missing is not None:
+            status, reason = missing, None if missing == "no_plate" else post.reason
         elif post.status in {"low_format_confidence", "vehicle_plate_family_mismatch"}:
             status, reason = "low_confidence", post.reason
         elif not post.valid:

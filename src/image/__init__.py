@@ -1,12 +1,3 @@
-"""Independent still-image ALPR pipeline package."""
+"""Still-image ALPR pipeline and its implementation modules."""
 
-from typing import Any
-
-
-def run_image(*args: Any, **kwargs: Any) -> Any:
-    from .pipeline import run_image as implementation
-
-    return implementation(*args, **kwargs)
-
-
-__all__ = ["run_image"]
+__all__: list[str] = []

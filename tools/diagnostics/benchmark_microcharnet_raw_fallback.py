@@ -8,7 +8,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from src.microcharnet_ocr import (
+from src.core.ocr import (
     MicroCharNetOCR,
     OCRCharacter,
     _RawCharacter,

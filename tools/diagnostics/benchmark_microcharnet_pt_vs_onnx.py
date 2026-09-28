@@ -9,7 +9,7 @@ import cv2
 import numpy as np
 
 from .microcharnet_export import register_custom_layers
-from src.microcharnet_ocr import MicroCharNetOCR, OCRCharacter, OutputFormat, _iou
+from src.core.ocr import MicroCharNetOCR, OCRCharacter, OutputFormat, _iou
 
 
 def _default_crops(root: Path) -> list[Path]:

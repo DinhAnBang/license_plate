@@ -5,10 +5,9 @@ from pathlib import Path
 
 import pytest
 
-from src.ocr_fusion import (
+from src.core.ocr_fusion import (
     GAP, OCRFusionCandidate, candidate_weight, fuse_candidates, fuse_track,
 )
-from tools.diagnostics.run_video_fusion_accuracy import run_video_fusion_accuracy
 
 
 def _candidate(rank, text, confidence=0.9, quality=0.9, frame=None):
@@ -131,7 +130,7 @@ def test_fusion_does_not_apply_vietnam_plate_format():
     result = fuse_track(3, [_candidate(1, "72a16231")])
     assert result.raw_text == "72a16231"
     assert "-" not in result.raw_text and "." not in result.raw_text
-    source = Path(__file__).resolve().parents[1] / "src/ocr_fusion.py"
+    source = Path(__file__).resolve().parents[1] / "src/core/ocr_fusion.py"
     assert "postprocess_vietnam_plate" not in source.read_text(encoding="utf-8")
 
 
@@ -139,29 +138,3 @@ def test_plate_confidence_is_off_by_default():
     candidate = OCRFusionCandidate(3, 1, 1, "ABC", 0.9, 0.8,
                                    plate_confidence=0.1)
     assert candidate_weight(candidate) == pytest.approx(0.72)
-
-
-def test_diagnostic_uses_production_fusion_and_keeps_empty_track(tmp_path):
-    crop_result = tmp_path / "crop.json"
-    crop_result.write_text(json.dumps({
-        "ocr": {"text": "72a16231", "confidence": 0.9, "status": "ok"},
-        "characters": [{"confidence": 0.9}] * 8,
-    }), encoding="utf-8")
-    summary = tmp_path / "ocr_summary.json"
-    summary.write_text(json.dumps({"tracks": [
-        {"track_id": 1, "crops": [{
-            "rank": 1, "frame_index": 2, "ocr_text": "72a16231",
-            "ocr_confidence": 0.9, "quality_score": 0.8,
-            "plate_confidence": 0.7, "result_path": str(crop_result),
-        }]},
-        {"track_id": 4, "crops": []},
-    ]}), encoding="utf-8")
-    result = run_video_fusion_accuracy(summary, tmp_path / "fusion")
-    assert [track["raw_text"] for track in result["tracks"]] == ["72a16231", None]
-    track1 = json.loads((tmp_path / "fusion/track_1/report.json").read_text())
-    track4 = json.loads((tmp_path / "fusion/track_4/report.json").read_text())
-    assert track1["inputs"][0]["weight"] == pytest.approx(0.72)
-    assert track1["fusion"]["method"] == "single_candidate"
-    assert track4["status"] == "no_ocr_candidates"
-    assert track4["fusion"]["raw_text"] is None
-    assert (tmp_path / "fusion/summary.md").is_file()

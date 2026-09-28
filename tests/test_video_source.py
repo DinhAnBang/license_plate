@@ -4,7 +4,7 @@ import cv2
 import numpy as np
 import pytest
 
-from src.video import VideoReader
+from src.video.source import VideoReader
 
 
 def _write_video(path, frame_count=3):
