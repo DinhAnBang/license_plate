@@ -16,6 +16,7 @@ from src.image.customer_output import (
     write_customer_json,
 )
 from src.paths import application_directory
+from src.video.customer_output import build_video_customer_payload, write_video_customer_json
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -84,17 +85,15 @@ def main(argv: list[str] | None = None) -> int:
         kwargs = {
             "output": output,
             "save_annotated": (
-                args.save_annotated or release_mode
+                args.save_annotated or release_mode or suffix in VIDEO_EXTENSIONS
             ) and not (release_mode and suffix in IMAGE_EXTENSIONS),
             "save_topk_crops": args.save_topk_crops and not release_mode,
-            "debug": args.debug,
+            "debug": args.debug if suffix in IMAGE_EXTENSIONS else args.debug and not release_mode,
         }
         if suffix in IMAGE_EXTENSIONS:
             result = pipeline.process_image(source, **kwargs)
         else:
-            raise RuntimeError(
-                "Video pipeline is temporarily unavailable while it is being rebuilt."
-            )
+            result = pipeline.process_video(source, **kwargs)
         if release_mode:
             assert release_directory is not None
             if suffix in IMAGE_EXTENSIONS:
@@ -106,13 +105,22 @@ def main(argv: list[str] | None = None) -> int:
                     min_confidence=pipeline.config.low_confidence_threshold,
                 )
                 result["annotated_path"] = str(annotated_path)
-            write_customer_json(
-                output,
-                build_customer_payload(
-                    result,
-                    min_confidence=pipeline.config.low_confidence_threshold,
-                ),
-            )
+            if suffix in IMAGE_EXTENSIONS:
+                write_customer_json(
+                    output,
+                    build_customer_payload(
+                        result,
+                        min_confidence=pipeline.config.low_confidence_threshold,
+                    ),
+                )
+            else:
+                write_video_customer_json(
+                    output,
+                    build_video_customer_payload(
+                        result,
+                        min_confidence=pipeline.config.low_confidence_threshold,
+                    ),
+                )
         summary = result["summary"]
         print(f"Processed {result['input']['type']}: {source}")
         print(

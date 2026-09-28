@@ -107,6 +107,28 @@ class ExactVote:
 
 
 @dataclass(frozen=True, slots=True)
+class AlignmentContribution:
+    frame_index: int
+    rank: int
+    token: str
+    base_weight: float
+    char_confidence: float | None
+    vote_weight: float
+
+
+@dataclass(frozen=True, slots=True)
+class AlignmentColumnVote:
+    """The weights already used to select one aligned output column."""
+
+    position: int
+    reference_token: str
+    selected_token: str
+    character_weights: tuple[tuple[str, float], ...]
+    gap_weight: float
+    candidate_contributions: tuple[AlignmentContribution, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class FusedOCRResult:
     """Compact production result plus deterministic diagnostic fields."""
 
@@ -126,6 +148,7 @@ class FusedOCRResult:
     mean_support_quality: float = 0.0
     alignment_rows: tuple[tuple[int, str, tuple[str, ...]], ...] = ()
     alignment_reference_row: tuple[str, ...] = ()
+    alignment_column_votes: tuple[AlignmentColumnVote, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -440,7 +463,7 @@ def _alignment_fusion(
     candidates: Sequence[OCRFusionCandidate],
     reference: str,
     config: OCRFusionConfig,
-) -> tuple[str, int, tuple[int, ...], tuple[tuple[int, str, tuple[str, ...]], ...], tuple[str, ...]]:
+) -> tuple[str, int, tuple[int, ...], tuple[tuple[int, str, tuple[str, ...]], ...], tuple[str, ...], tuple[AlignmentColumnVote, ...]]:
     aligned = [_align_candidate(reference, candidate) for candidate in candidates]
     insertion_widths = {
         slot: max(len(item.insertions.get(slot, ())) for item in aligned)
@@ -449,24 +472,53 @@ def _alignment_fusion(
     reference_row: list[str] = []
     rows: list[list[str]] = [[] for _ in candidates]
     fused: list[str] = []
+    column_votes: list[AlignmentColumnVote] = []
     for slot in range(len(reference) + 1):
         for insertion_index in range(insertion_widths[slot]):
             reference_row.append(GAP)
             character_weights: dict[str, float] = defaultdict(float)
             gap_weight = 0.0
+            contributions: list[AlignmentContribution] = []
             for candidate_index, candidate in enumerate(candidates):
                 pair = aligned[candidate_index].insertions.get(slot, ())
+                base_weight = candidate_weight(candidate, config.include_plate_confidence)
                 if insertion_index < len(pair):
                     character, index = pair[insertion_index]
-                    character_weights[character] += _character_weight(candidate, index, config)
+                    vote_weight = _character_weight(candidate, index, config)
+                    character_weights[character] += vote_weight
                     rows[candidate_index].append(character)
+                    char_confidence = (
+                        candidate.char_confidences[index]
+                        if candidate.char_confidences is not None
+                        and 0 <= index < len(candidate.char_confidences)
+                        else None
+                    )
                 else:
-                    gap_weight += candidate_weight(candidate, config.include_plate_confidence)
+                    character = GAP
+                    vote_weight = base_weight
+                    gap_weight += vote_weight
                     rows[candidate_index].append(GAP)
+                    char_confidence = None
+                contributions.append(AlignmentContribution(
+                    frame_index=candidate.frame_index,
+                    rank=candidate.rank,
+                    token=character,
+                    base_weight=base_weight,
+                    char_confidence=char_confidence,
+                    vote_weight=vote_weight,
+                ))
             selected = _choose_character(character_weights, None)
             best_character_weight = max(character_weights.values(), default=0.0)
             if gap_weight > best_character_weight:
                 selected = GAP
+            column_votes.append(AlignmentColumnVote(
+                position=len(reference_row) - 1,
+                reference_token=GAP,
+                selected_token=selected,
+                character_weights=tuple(sorted(character_weights.items())),
+                gap_weight=gap_weight,
+                candidate_contributions=tuple(contributions),
+            ))
             if selected != GAP:
                 fused.append(selected)
         if slot < len(reference):
@@ -474,20 +526,47 @@ def _alignment_fusion(
             reference_row.append(reference_character)
             character_weights: dict[str, float] = defaultdict(float)
             gap_weight = 0.0
+            contributions = []
             for candidate_index, candidate in enumerate(candidates):
                 character, index = aligned[candidate_index].reference_chars.get(
                     slot, (GAP, -1)
                 )
+                base_weight = candidate_weight(candidate, config.include_plate_confidence)
                 if character == GAP:
-                    gap_weight += candidate_weight(candidate, config.include_plate_confidence)
+                    vote_weight = base_weight
+                    gap_weight += vote_weight
                     rows[candidate_index].append(GAP)
+                    char_confidence = None
                 else:
-                    character_weights[character] += _character_weight(candidate, index, config)
+                    vote_weight = _character_weight(candidate, index, config)
+                    character_weights[character] += vote_weight
                     rows[candidate_index].append(character)
+                    char_confidence = (
+                        candidate.char_confidences[index]
+                        if candidate.char_confidences is not None
+                        and 0 <= index < len(candidate.char_confidences)
+                        else None
+                    )
+                contributions.append(AlignmentContribution(
+                    frame_index=candidate.frame_index,
+                    rank=candidate.rank,
+                    token=character,
+                    base_weight=base_weight,
+                    char_confidence=char_confidence,
+                    vote_weight=vote_weight,
+                ))
             selected = _choose_character(character_weights, reference_character)
             best_character_weight = max(character_weights.values(), default=0.0)
             if gap_weight > best_character_weight:
                 selected = GAP
+            column_votes.append(AlignmentColumnVote(
+                position=len(reference_row) - 1,
+                reference_token=reference_character,
+                selected_token=selected,
+                character_weights=tuple(sorted(character_weights.items())),
+                gap_weight=gap_weight,
+                candidate_contributions=tuple(contributions),
+            ))
             if selected != GAP:
                 fused.append(selected)
 
@@ -496,7 +575,10 @@ def _alignment_fusion(
         for index, candidate in enumerate(candidates)
     )
     support_frames = tuple(candidate.frame_index for candidate in candidates)
-    return "".join(fused), len(candidates), support_frames, alignment_rows, tuple(reference_row)
+    return (
+        "".join(fused), len(candidates), support_frames,
+        alignment_rows, tuple(reference_row), tuple(column_votes),
+    )
 
 
 def _mean(values: Iterable[float]) -> float:
@@ -606,7 +688,7 @@ def fuse_track(
         )
 
     reference = _weighted_medoid(valid, votes, config)
-    fused_text, support_count, support_frames, alignment_rows, reference_row = _alignment_fusion(
+    fused_text, support_count, support_frames, alignment_rows, reference_row, column_votes = _alignment_fusion(
         int(track_id), valid, reference, config
     )
     confidence, mean_ocr, mean_quality = _confidence(
@@ -629,6 +711,7 @@ def fuse_track(
         mean_support_quality=mean_quality,
         alignment_rows=alignment_rows,
         alignment_reference_row=reference_row,
+        alignment_column_votes=column_votes,
     )
 
 
@@ -693,7 +776,7 @@ def fuse_candidates(
 
 
 __all__ = [
-    "GAP", "ExactVote", "FusedOCRResult", "OCRFusionCandidate", "OCRFusionConfig",
+    "GAP", "ExactVote", "AlignmentContribution", "AlignmentColumnVote", "FusedOCRResult", "OCRFusionCandidate", "OCRFusionConfig",
     "OCRFusionReport", "align_pair", "candidate_weight", "fuse_candidates",
     "fuse_track", "levenshtein_distance", "normalized_levenshtein_distance",
 ]

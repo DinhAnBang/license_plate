@@ -63,6 +63,7 @@ class OCRCharacter:
     class_id: int
     confidence: float
     bbox: tuple[int, int, int, int]
+    raw_index: int = -1
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,6 +118,7 @@ class _RawCharacter:
     class_id: int
     confidence: float
     box: tuple[float, float, float, float]
+    raw_index: int = -1
 
 
 def _parse_names_metadata(raw_names: str | None) -> tuple[str, ...]:
@@ -211,6 +213,7 @@ def _class_agnostic_nms(
 
 def _group_and_sort_characters(
     detections: Sequence[OCRCharacter],
+    trace_out: dict[str, object] | None = None,
 ) -> list[list[OCRCharacter]]:
     """Order detected characters and separate a genuine second row.
 
@@ -219,12 +222,16 @@ def _group_and_sort_characters(
     """
 
     if not detections:
+        if trace_out is not None:
+            trace_out.update({"row_count": 0, "split_index": None, "candidates": []})
         return []
     ordered = sorted(
         detections,
         key=lambda item: ((item.bbox[1] + item.bbox[3]) / 2.0, item.bbox[0]),
     )
     if len(ordered) == 1:
+        if trace_out is not None:
+            trace_out.update({"row_count": 1, "split_index": None, "candidates": []})
         return [ordered]
 
     centers_y = np.asarray(
@@ -242,6 +249,7 @@ def _group_and_sort_characters(
     # candidate row centers with their own robust vertical spread instead.
     split_index: int | None = None
     split_score = float("-inf")
+    split_candidates: list[dict[str, float | int | bool]] = []
     for candidate_index in range(2, len(ordered) - 1):
         upper = centers_y[:candidate_index]
         lower = centers_y[candidate_index:]
@@ -253,6 +261,16 @@ def _group_and_sort_characters(
         lower_spread = float(np.median(np.abs(lower - lower_center)))
         row_spread = max(1.0, upper_spread, lower_spread)
         minimum_center_gap = max(0.35 * median_height, 2.0 * row_spread)
+        accepted = center_gap >= minimum_center_gap and boundary_gap >= 0.25 * median_height
+        if trace_out is not None:
+            split_candidates.append({
+                "split_index": candidate_index,
+                "center_gap": center_gap,
+                "boundary_gap": boundary_gap,
+                "row_spread": row_spread,
+                "minimum_center_gap": minimum_center_gap,
+                "accepted": accepted,
+            })
         if center_gap < minimum_center_gap or boundary_gap < 0.25 * median_height:
             continue
         score = center_gap / row_spread
@@ -272,6 +290,14 @@ def _group_and_sort_characters(
             np.mean([(item.bbox[1] + item.bbox[3]) / 2.0 for item in group])
         )
     )
+    if trace_out is not None:
+        trace_out.update({
+            "row_count": len(groups),
+            "split_index": split_index,
+            "median_character_height": median_height,
+            "character_centers_y": [float(value) for value in centers_y],
+            "candidates": split_candidates,
+        })
     return groups
 
 
@@ -580,20 +606,25 @@ class MicroCharNetOCR:
         )
 
     def _decode(
-        self, output: np.ndarray, transform: _Transform
+        self, output: np.ndarray, transform: _Transform,
+        trace_out: dict[str, object] | None = None,
     ) -> tuple[OCRResult, tuple[OCRCharacter, ...]]:
         if self.output_format is OutputFormat.END2END:
-            return self._decode_end2end(output, transform)
-        return self._decode_raw(output, transform)
+            return self._decode_end2end(output, transform, trace_out)
+        return self._decode_raw(output, transform, trace_out)
 
     def _build_result(
         self,
         characters: Sequence[OCRCharacter],
         output_shape: Sequence[int],
+        trace_out: dict[str, object] | None = None,
     ) -> tuple[OCRResult, tuple[OCRCharacter, ...]]:
         """Sort decoded characters and build the common result object."""
 
-        lines = _group_and_sort_characters(characters)
+        sort_trace: dict[str, object] | None = {} if trace_out is not None else None
+        lines = _group_and_sort_characters(characters, sort_trace)
+        if trace_out is not None:
+            trace_out["sorting"] = sort_trace
         ordered_characters = tuple(character for line in lines for character in line)
         text = "".join(character.char for character in ordered_characters)
         char_confidences = tuple(
@@ -612,7 +643,8 @@ class MicroCharNetOCR:
         return result, ordered_characters
 
     def _decode_end2end(
-        self, output: np.ndarray, transform: _Transform
+        self, output: np.ndarray, transform: _Transform,
+        trace_out: dict[str, object] | None = None,
     ) -> tuple[OCRResult, tuple[OCRCharacter, ...]]:
         """Decode processed rows and suppress duplicate glyph hypotheses.
 
@@ -636,17 +668,39 @@ class MicroCharNetOCR:
             )
 
         candidates: list[_RawCharacter] = []
-        for row in output[0].astype(np.float32, copy=False):
+        trace_rows: list[dict[str, object]] = []
+        after_confidence_count = 0
+        for row_index, row in enumerate(output[0].astype(np.float32, copy=False)):
             x1, y1, x2, y2, confidence_raw, class_id_raw = [
                 float(value) for value in row
             ]
             confidence = float(confidence_raw)
+            trace_row: dict[str, object] | None = None
+            if trace_out is not None:
+                trace_row = {
+                    "raw_index": row_index,
+                    "model_bbox_xyxy": [x1, y1, x2, y2],
+                    "confidence": confidence,
+                    "class_id": class_id_raw,
+                    "char": (
+                        self.class_names[int(round(class_id_raw))]
+                        if np.isfinite(class_id_raw)
+                        and np.isclose(class_id_raw, round(class_id_raw))
+                        and 0 <= int(round(class_id_raw)) < self.num_classes
+                        else None
+                    ),
+                    "status": "below_confidence",
+                }
+                trace_rows.append(trace_row)
             if not np.isfinite(confidence) or confidence < self.conf_threshold:
                 continue
             if confidence < 0.0 or confidence > 1.0:
                 raise OCRModelError(
                     "MicroCharNet end-to-end confidence is outside [0, 1]"
                 )
+            after_confidence_count += 1
+            if trace_row is not None:
+                trace_row["status"] = "after_confidence"
 
             class_id = int(round(class_id_raw))
             if not np.isclose(class_id_raw, class_id) or not 0 <= class_id < self.num_classes:
@@ -654,6 +708,8 @@ class MicroCharNetOCR:
                     "MicroCharNet end-to-end class_id is outside the character mapping"
                 )
             if not all(np.isfinite((x1, y1, x2, y2))):
+                if trace_row is not None:
+                    trace_row["status"] = "invalid_model_bbox"
                 continue
 
             source_box = (
@@ -687,36 +743,73 @@ class MicroCharNetOCR:
                 ),
             )
             if source_box[2] <= source_box[0] or source_box[3] <= source_box[1]:
+                if trace_row is not None:
+                    trace_row["status"] = "invalid_source_bbox"
                 continue
+            if trace_row is not None:
+                trace_row["char"] = self.class_names[class_id]
+                trace_row["source_bbox_xyxy"] = list(source_box)
+                trace_row["status"] = "suppressed_nms"
             candidates.append(
                 _RawCharacter(
                     char=self.class_names[class_id],
                     class_id=class_id,
                     confidence=confidence,
                     box=source_box,
+                    raw_index=row_index,
                 )
             )
 
         kept = _class_agnostic_nms(candidates, self.iou_threshold)
         characters: list[OCRCharacter] = []
         for item in kept:
+            if trace_out is not None:
+                trace_rows[item.raw_index]["status"] = "after_nms"
             integer_box = _as_int_bbox(
                 item.box, transform.source_width, transform.source_height
             )
             if integer_box is None:
+                if trace_out is not None:
+                    trace_rows[item.raw_index]["status"] = "invalid_integer_bbox"
                 continue
+            if trace_out is not None:
+                trace_rows[item.raw_index]["status"] = "final"
+                trace_rows[item.raw_index]["bbox_xyxy"] = list(integer_box)
             characters.append(
                 OCRCharacter(
                     char=item.char,
                     class_id=item.class_id,
                     confidence=item.confidence,
                     bbox=integer_box,
+                    raw_index=item.raw_index,
                 )
             )
-        return self._build_result(characters, output.shape)
+        result, ordered = self._build_result(characters, output.shape, trace_out)
+        if trace_out is not None:
+            for order, character in enumerate(ordered, start=1):
+                trace_rows[character.raw_index]["reading_order"] = order
+            trace_out.update({
+                "output_format": OutputFormat.END2END.value,
+                "onnx_output_stage": "post_graph_topk_before_application_filters",
+                "raw_output_shape": list(output.shape),
+                "raw_character_count": len(output[0]),
+                "raw_above_0_01_count": sum(
+                    float(row[4]) >= 0.01 for row in output[0]
+                ),
+                "raw_above_0_10_count": sum(
+                    float(row[4]) >= 0.10 for row in output[0]
+                ),
+                "after_confidence_count": after_confidence_count,
+                "after_geometry_count": len(candidates),
+                "after_nms_count": len(kept),
+                "final_character_count": len(ordered),
+                "rows": trace_rows,
+            })
+        return result, ordered
 
     def _decode_raw(
-        self, output: np.ndarray, transform: _Transform
+        self, output: np.ndarray, transform: _Transform,
+        trace_out: dict[str, object] | None = None,
     ) -> tuple[OCRResult, tuple[OCRCharacter, ...]]:
         """Decode raw ``xywh + class probabilities`` with class-agnostic NMS."""
 
@@ -739,10 +832,24 @@ class MicroCharNetOCR:
         class_ids = np.argmax(class_scores, axis=1).astype(np.int64)
         confidences = class_scores[np.arange(len(class_scores)), class_ids]
         candidates: list[_RawCharacter] = []
-        for box, class_id_raw, confidence_raw in zip(
+        trace_rows: list[dict[str, object]] = []
+        after_confidence_count = 0
+        for row_index, (box, class_id_raw, confidence_raw) in enumerate(zip(
             boxes_xywh, class_ids, confidences
+        )
         ):
             confidence = float(confidence_raw)
+            trace_row: dict[str, object] | None = None
+            if trace_out is not None:
+                trace_row = {
+                    "raw_index": row_index,
+                    "model_bbox_xywh": [float(value) for value in box],
+                    "confidence": confidence,
+                    "class_id": int(class_id_raw),
+                    "char": self.class_names[int(class_id_raw)],
+                    "status": "below_confidence",
+                }
+                trace_rows.append(trace_row)
             if not np.isfinite(confidence) or confidence < self.conf_threshold:
                 continue
             if confidence < 0.0 or confidence > 1.0:
@@ -750,10 +857,17 @@ class MicroCharNetOCR:
                     "MicroCharNet class output is outside [0, 1]; graph semantics "
                     "are not the expected sigmoid probabilities."
                 )
+            after_confidence_count += 1
+            if trace_row is not None:
+                trace_row["status"] = "after_confidence"
             center_x, center_y, width, height = [float(value) for value in box]
             if not all(np.isfinite((center_x, center_y, width, height))):
+                if trace_row is not None:
+                    trace_row["status"] = "invalid_model_bbox"
                 continue
             if width <= 0.0 or height <= 0.0:
+                if trace_row is not None:
+                    trace_row["status"] = "invalid_model_bbox"
                 continue
 
             x1 = (center_x - width / 2.0 - transform.pad_x) / transform.scale
@@ -767,34 +881,69 @@ class MicroCharNetOCR:
                 float(np.clip(y2, 0.0, transform.source_height)),
             )
             if source_box[2] <= source_box[0] or source_box[3] <= source_box[1]:
+                if trace_row is not None:
+                    trace_row["status"] = "invalid_source_bbox"
                 continue
             class_id = int(class_id_raw)
+            if trace_row is not None:
+                trace_row["source_bbox_xyxy"] = list(source_box)
+                trace_row["status"] = "suppressed_nms"
             candidates.append(
                 _RawCharacter(
                     char=self.class_names[class_id],
                     class_id=class_id,
                     confidence=confidence,
                     box=source_box,
+                    raw_index=row_index,
                 )
             )
 
         kept = _class_agnostic_nms(candidates, self.iou_threshold)
         characters: list[OCRCharacter] = []
         for item in kept:
+            if trace_out is not None:
+                trace_rows[item.raw_index]["status"] = "after_nms"
             integer_box = _as_int_bbox(
                 item.box, transform.source_width, transform.source_height
             )
             if integer_box is None:
+                if trace_out is not None:
+                    trace_rows[item.raw_index]["status"] = "invalid_integer_bbox"
                 continue
+            if trace_out is not None:
+                trace_rows[item.raw_index]["status"] = "final"
+                trace_rows[item.raw_index]["bbox_xyxy"] = list(integer_box)
             characters.append(
                 OCRCharacter(
                     char=item.char,
                     class_id=item.class_id,
                     confidence=item.confidence,
                     bbox=integer_box,
+                    raw_index=item.raw_index,
                 )
             )
-        return self._build_result(characters, output.shape)
+        result, ordered = self._build_result(characters, output.shape, trace_out)
+        if trace_out is not None:
+            for order, character in enumerate(ordered, start=1):
+                trace_rows[character.raw_index]["reading_order"] = order
+            trace_out.update({
+                "output_format": OutputFormat.RAW.value,
+                "onnx_output_stage": "raw_head_before_application_filters",
+                "raw_output_shape": list(output.shape),
+                "raw_character_count": len(predictions),
+                "raw_above_0_01_count": sum(
+                    float(value) >= 0.01 for value in confidences
+                ),
+                "raw_above_0_10_count": sum(
+                    float(value) >= 0.10 for value in confidences
+                ),
+                "after_confidence_count": after_confidence_count,
+                "after_geometry_count": len(candidates),
+                "after_nms_count": len(kept),
+                "final_character_count": len(ordered),
+                "rows": trace_rows,
+            })
+        return result, ordered
 
     def recognize(self, crop: np.ndarray) -> OCRResult:
         """Run one independent OCR inference on one retained plate crop."""
@@ -827,7 +976,8 @@ class MicroCharNetOCR:
         return result
 
     def recognize_with_debug(
-        self, crop: np.ndarray
+        self, crop: np.ndarray,
+        trace_out: dict[str, object] | None = None,
     ) -> tuple[OCRResult, tuple[OCRCharacter, ...], OCRTiming]:
         """Return character boxes for debug rendering without changing OCR text."""
 
@@ -840,7 +990,7 @@ class MicroCharNetOCR:
         output = self.session.run([self.output_name], {self.input_name: tensor})[0]
         inference_seconds = time.perf_counter() - inference_started
         decode_started = time.perf_counter()
-        result, characters = self._decode(np.asarray(output), transform)
+        result, characters = self._decode(np.asarray(output), transform, trace_out)
         decode_seconds = time.perf_counter() - decode_started
         self._counters.preprocess_seconds += preprocess_seconds
         self._counters.inference_seconds += inference_seconds

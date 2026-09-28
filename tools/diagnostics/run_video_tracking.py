@@ -1,4 +1,4 @@
-"""Run only Module 2: YOLO26 vehicle detection on a video."""
+"""Run Module 4: validated YOLO26 vehicle detections plus stable tracking."""
 
 from __future__ import annotations
 
@@ -11,7 +11,8 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.paths import application_directory
-from src.video.vehicle_stage import run_video_vehicle_detection
+from src.video.tracking_stage import run_video_vehicle_tracking
+from src.video.tracking import VehicleTrackingConfig
 from src.video.vehicle_validation import VehicleValidationConfig
 
 
@@ -24,25 +25,19 @@ def main() -> int:
         type=Path,
         default=application_directory() / "models" / "vehicle" / "yolo26n.onnx",
     )
-    parser.add_argument(
-        "--confidence",
-        type=float,
-        default=0.10,
-        help="minimum confidence sent to YOLO before validation",
-    )
+    parser.add_argument("--confidence", type=float, default=0.10)
     parser.add_argument("--min-confidence", type=float, default=0.50)
-    parser.add_argument("--min-width", type=int, default=8)
-    parser.add_argument("--min-height", type=int, default=8)
-    parser.add_argument(
-        "--show-rejected",
-        action="store_true",
-        help="also draw rejected raw boxes in red",
-    )
+    parser.add_argument("--new-track-confidence", type=float, default=0.55)
     parser.add_argument("--iou", type=float, default=0.45)
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="cpu")
+    parser.add_argument("--max-lost-seconds", type=float, default=0.5)
+    parser.add_argument("--archive-seconds", type=float, default=10.0)
+    parser.add_argument("--reid-similarity", type=float, default=0.80)
+    parser.add_argument("--wide-edge-ratio", type=float, default=0.98)
+    parser.add_argument("--wide-edge-min-confidence", type=float, default=0.50)
     args = parser.parse_args()
 
-    result = run_video_vehicle_detection(
+    result = run_video_vehicle_tracking(
         args.input,
         args.output_dir,
         model_path=args.model,
@@ -51,15 +46,21 @@ def main() -> int:
         device=args.device,
         validation_config=VehicleValidationConfig(
             min_confidence=args.min_confidence,
-            min_width_pixels=args.min_width,
-            min_height_pixels=args.min_height,
+            wide_edge_bbox_ratio=args.wide_edge_ratio,
+            wide_edge_min_confidence=args.wide_edge_min_confidence,
         ),
-        show_rejected=args.show_rejected,
+        tracking_config=VehicleTrackingConfig(
+            high_confidence=args.min_confidence,
+            new_track_confidence=args.new_track_confidence,
+            max_lost_seconds=args.max_lost_seconds,
+            archive_seconds=args.archive_seconds,
+            reidentification_similarity=args.reid_similarity,
+        ),
     )
     print(f"Frames: {result['summary']['frames_read']}")
-    print(f"Raw vehicle boxes: {result['summary']['raw_vehicle_detections']}")
-    print(f"Accepted vehicle boxes: {result['summary']['accepted_vehicle_detections']}")
-    print(f"Rejected vehicle boxes: {result['summary']['rejected_vehicle_detections']}")
+    print(f"Accepted vehicle detections: {result['summary']['accepted_vehicle_detections']}")
+    print(f"Unique track IDs: {result['summary']['unique_track_ids_created']}")
+    print(f"Reidentified: {result['summary']['reidentified_count']}")
     print(f"JSON: {result['output_path']}")
     if "annotated_path" in result:
         print(f"Annotated: {result['annotated_path']}")
