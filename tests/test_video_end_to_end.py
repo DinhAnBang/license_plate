@@ -1,5 +1,6 @@
 """Video production routing, finalization, and two-pass rendering regressions."""
 
+import io
 import json
 from collections import Counter
 from dataclasses import replace
@@ -323,6 +324,7 @@ def test_main_cli_routes_video_to_production_pipeline(tmp_path, monkeypatch):
                 "output_path": str(tmp_path / "result.json")}
 
     monkeypatch.setattr(main, "ALPRPipeline", FakePipeline)
+    monkeypatch.setattr(main.sys, "stdin", io.StringIO(""))
     assert main.main(["--input", str(source), "--output", str(tmp_path / "result.json")]) == 0
     assert len(calls) == 1 and calls[0][0] == source
     assert calls[0][1]["save_annotated"] is True
@@ -351,6 +353,7 @@ def test_main_release_video_filters_only_customer_json(tmp_path, monkeypatch):
             return {**core, "output_path": str(kwargs["output"])}
 
     monkeypatch.setattr(main, "ALPRPipeline", FakePipeline)
+    monkeypatch.setattr(main.sys, "stdin", io.StringIO(""))
     monkeypatch.setattr(main, "_release_paths", lambda _source:
                         (release_dir, release_dir / "sample.json"))
     assert main.main(["--input", str(source), "--release", "--debug"]) == 0

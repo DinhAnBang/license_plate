@@ -1,4 +1,4 @@
-"""Run the complete ONNX ALPR pipeline for one image or video."""
+"""Run the ONNX ALPR pipeline and keep accepting image/video requests."""
 
 from __future__ import annotations
 
@@ -21,9 +21,10 @@ from src.video.customer_output import build_video_customer_payload, write_video_
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    mode = parser.add_mutually_exclusive_group(required=True)
-    mode.add_argument("--input", type=Path, help="Image or video path")
-    mode.add_argument("--serve", action="store_true", help="Keep the engine alive for JSON-line requests")
+    parser.add_argument(
+        "--input", nargs="?", type=Path, required=True,
+        help="Start the persistent engine; optionally process this image/video first",
+    )
     parser.add_argument(
         "--output",
         type=Path,
@@ -63,11 +64,13 @@ def _development_output_path(output: Path | None) -> Path | None:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    if args.serve:
-        from src.engine import serve
-        return serve(device=args.device)
     source = args.input
-    assert source is not None
+    if source is None:
+        if args.output is not None or args.save_annotated or args.save_topk_crops or args.release:
+            print("ALPR error: output options require a path after --input", file=sys.stderr)
+            return 2
+        from src.engine import run_input_stream
+        return run_input_stream(device=args.device, debug=args.debug)
     output = args.output
     release_mode = bool(args.release or getattr(sys, "frozen", False))
     try:
@@ -136,7 +139,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"JSON: {result['output_path']}")
         if "annotated_path" in result:
             print(f"Annotated: {result['annotated_path']}")
-        return 0
+        # Keep the loaded model sessions for requests sent after this input.
+        # Closing stdin still ends a command-line run after its first file.
+        from src.engine import run_input_stream
+        return run_input_stream(device=args.device, pipeline=pipeline)
     except (FileNotFoundError, ValueError, RuntimeError, OSError, json.JSONDecodeError) as exc:
         if args.debug:
             traceback.print_exc()

@@ -6,6 +6,7 @@ import contextlib
 import json
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any, TextIO
 from uuid import uuid4
@@ -70,7 +71,10 @@ def _handle(request: Any, pipeline: ALPRPipeline) -> tuple[dict[str, Any], bool]
         extensions = IMAGE_EXTENSIONS if media_type == "image" else VIDEO_EXTENSIONS if media_type == "video" else None
         if extensions is None or source.suffix.lower() not in extensions:
             raise ValueError(f"Unsupported type or extension: {media_type}, {source.suffix}")
-        output_dir = application_directory() / "output" / "requests" / uuid4().hex
+        # Write each request's files beside the executable, as with an
+        # initial --input PATH. The suffix prevents same-second collisions.
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_dir = application_directory() / f"{source.stem}_{timestamp}_{uuid4().hex[:8]}"
         output = output_dir / f"{source.stem}.json"
         started = time.perf_counter()
         if media_type == "image":
@@ -88,15 +92,17 @@ def _handle(request: Any, pipeline: ALPRPipeline) -> tuple[dict[str, Any], bool]
         }, False
 
 
-def serve(device: str = "auto", *, input_stream: TextIO | None = None,
-          output_stream: TextIO | None = None) -> int:
+def run_input_stream(device: str = "auto", *, pipeline: ALPRPipeline | None = None,
+                     debug: bool = False, input_stream: TextIO | None = None,
+                     output_stream: TextIO | None = None) -> int:
     """Keep model sessions alive and process requests until shutdown or stdin EOF."""
     incoming = input_stream if input_stream is not None else sys.stdin
     outgoing = output_stream if output_stream is not None else sys.stdout
     _emit(outgoing, {"event": "starting"})
     try:
-        with contextlib.redirect_stdout(sys.stderr):
-            pipeline = ALPRPipeline(device=device)
+        if pipeline is None:
+            with contextlib.redirect_stdout(sys.stderr):
+                pipeline = ALPRPipeline(device=device, debug=debug)
     except Exception as exc:
         print(f"ALPR startup error: {exc}", file=sys.stderr)
         return 1
@@ -117,4 +123,4 @@ def serve(device: str = "auto", *, input_stream: TextIO | None = None,
     return 0
 
 
-__all__ = ["serve"]
+__all__ = ["run_input_stream"]
