@@ -7,9 +7,9 @@ import math
 from typing import Literal, Sequence
 
 import numpy as np
-from scipy.optimize import linear_sum_assignment
 
 from ..config import VehicleTrackingConfig
+from ..core.assignment import linear_sum_assignment
 from ..core.vehicle_detector import VehicleDetection
 from ..core.plate_geometry import bbox_iou
 from .tracking_kalman import KalmanFilterXYAH, xyah_to_xyxy, xyxy_to_xyah

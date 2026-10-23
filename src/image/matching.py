@@ -6,7 +6,7 @@ from collections.abc import Sequence
 from typing import Protocol
 
 import numpy as np
-from scipy.optimize import linear_sum_assignment
+from ..core.assignment import linear_sum_assignment
 
 
 INF_COST = 1_000_000.0
