@@ -21,7 +21,9 @@ from src.video.customer_output import build_video_customer_payload, write_video_
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--input", type=Path, required=True, help="Image or video path")
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--input", type=Path, help="Image or video path")
+    mode.add_argument("--serve", action="store_true", help="Keep the engine alive for JSON-line requests")
     parser.add_argument(
         "--output",
         type=Path,
@@ -61,7 +63,11 @@ def _development_output_path(output: Path | None) -> Path | None:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    if args.serve:
+        from src.engine import serve
+        return serve(device=args.device)
     source = args.input
+    assert source is not None
     output = args.output
     release_mode = bool(args.release or getattr(sys, "frozen", False))
     try:

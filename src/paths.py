@@ -14,4 +14,14 @@ def application_directory() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
-__all__ = ["application_directory"]
+def resource_directory() -> Path:
+    """Locate bundled read-only files, including PyInstaller onefile data."""
+
+    if getattr(sys, "frozen", False):
+        bundle_directory = getattr(sys, "_MEIPASS", None)
+        if bundle_directory is not None:
+            return Path(bundle_directory).resolve()
+    return application_directory()
+
+
+__all__ = ["application_directory", "resource_directory"]

@@ -119,6 +119,30 @@ def test_image_and_video_config_names_and_defaults_are_explicit():
     assert config.video.topk.top_k == 4
 
 
+def test_onefile_models_use_bundle_while_outputs_stay_beside_executable(monkeypatch, tmp_path):
+    from src.paths import application_directory, resource_directory
+
+    executable = tmp_path / "install" / "LicensePlate.exe"
+    bundle = tmp_path / "extracted"
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(executable))
+    monkeypatch.setattr(sys, "_MEIPASS", str(bundle), raising=False)
+
+    assert application_directory() == executable.parent
+    assert resource_directory() == bundle
+
+
+def test_source_models_still_use_project_directory():
+    from src.config import PipelineConfig
+    from src.paths import application_directory, resource_directory
+
+    config = PipelineConfig()
+    assert resource_directory() == application_directory()
+    assert config.vehicle.model == resource_directory() / "models/vehicle/yolo26n.onnx"
+    assert config.plate.model == resource_directory() / "models/plate/best.onnx"
+    assert config.ocr.model == resource_directory() / "models/OCR/microcharnet.onnx"
+
+
 def test_production_import_graph_has_no_cycle():
     modules = {}
     for path in SRC.rglob("*.py"):

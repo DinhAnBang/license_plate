@@ -2,7 +2,3 @@ onnxruntime
 opencv-python
 numpy
 scipy
-onnx
-ultralytics
-torch
-onnxslim

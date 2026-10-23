@@ -9,11 +9,11 @@ import numpy as np
 
 from .core.ocr_fusion import OCRFusionConfig
 from .core.plate_quality import PlateQualityConfig, VideoPlateQualityConfig
-from .paths import application_directory
+from .paths import resource_directory
 from .core.plate_postprocess import VietnamPostprocessConfig
 
 
-_APP_DIRECTORY = application_directory()
+_RESOURCE_DIRECTORY = resource_directory()
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,7 +184,7 @@ class VideoPlateBufferConfig:
 
 @dataclass(frozen=True, slots=True)
 class VehicleConfig:
-    model: Path = _APP_DIRECTORY / "models" / "vehicle" / "yolo26n.onnx"
+    model: Path = _RESOURCE_DIRECTORY / "models" / "vehicle" / "yolo26n.onnx"
     confidence: float = 0.10
     image_confidence: float = 0.25
     iou: float = 0.45
@@ -196,14 +196,14 @@ class VehicleConfig:
 
 @dataclass(frozen=True, slots=True)
 class PlateConfig:
-    model: Path = _APP_DIRECTORY / "models" / "plate" / "best.onnx"
+    model: Path = _RESOURCE_DIRECTORY / "models" / "plate" / "best.onnx"
     confidence: float = 0.25
     iou: float = 0.45
 
 
 @dataclass(frozen=True, slots=True)
 class OCRConfig:
-    model: Path = _APP_DIRECTORY / "models" / "OCR" / "microcharnet.onnx"
+    model: Path = _RESOURCE_DIRECTORY / "models" / "OCR" / "microcharnet.onnx"
     confidence: float = 0.25
     iou: float = 0.70
 
